@@ -1,3 +1,6 @@
+Intro
+This repo is based on the original repo [SQUIRE](https://github.com/bys0318/SQUIRE)
+
 ## SQUIRE: A Sequence-to-sequence Framework for Multi-hop Knowledge Graph Reasoning
 
 This is the official codebase of the **SQUIRE** <img src="figs/squire.gif" alt="drawing" width="40"/>framework for multi-hop reasoning, proposed in [SQUIRE: A Sequence-to-sequence Framework for Multi-hop Knowledge Graph Reasoning](https://arxiv.org/abs/2201.06206).
