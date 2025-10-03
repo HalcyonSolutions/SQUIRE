@@ -1,0 +1,74 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model checkpoints & training artifacts (from train.py -> save_path / checkpoint)
+models_new/
+*/checkpoint/
+ckpt_*.pt
+best*.pt
+
+# Logs
+*.log
+
+# Datasets (raw & large intermediates)
+data/**
+# Keep lightweight mapping or rule files (adjust as needed)
+!data/**/entity2id.txt
+!data/**/relation2id.txt
+!data/**/rule.dict
+# If you want to version small config JSONs, unignore similarly:
+# !data/**/config*.json
+
+# Temporary sampling / generated train/eval path files
+data/**/train_triples.txt
+data/**/valid_triples.txt
+data/**/test_triples.txt
+data/**/vocab.txt
+data/**/paths*/ 
+data/**/eval*/ 
+
+# AnyBURL mined rule outputs (keep rule.dict if curated)
+AnyBURL/output/
+AnyBURL/logs/
+# Optionally ignore large JARs if not maintaining them
+# *.jar
+
+# Checkpoint / experiment artifacts elsewhere
+runs/
+outputs/
+results/
+figs/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+*.cache
+
+# Packaging / build (if ever used)
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# HuggingFace / transformers cache (if appears locally in repo)
+hf_cache/
+
+# Anyburl
+AnyBURL/AnyBURL-JUNO.jar
+AnyBURL/path1/
