@@ -7,7 +7,6 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import json
-from numpy.core.numeric import Inf
 import math
 import torch.nn as nn
 

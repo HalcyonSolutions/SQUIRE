@@ -62,7 +62,12 @@ CUDA_VISIBLE_DEVICES=0 python train.py --dataset FB15K237-20 --embedding-dim 256
 CUDA_VISIBLE_DEVICES=0 python train.py --dataset NELL23K --embedding-dim 256 --hidden-size 512 \
     --num-layers 6 --batch-size 1024 --lr 5e-4 --dropout 0.1 --num-epoch 100 --save-dir "model_4" \
     --no-filter-gen --label-smooth 0.25 --encoder --save-interval 10 --l-punish --trainset "6_rev_rule" \
-    --prob 0.15 --beam-size 512 --test-batch-size 4 --iter --iter-batch-size 32
+    --prob 0.15 --beam-size 512 --test-batch-size 4 --iter --iter-batch-size 32 
+```
+
+**Run SQUIRE training on question inputs**
+```
+CUDA_LAUNCH_BLOCKING=1 python train_question_input.py   --dataset mquake   --csv-path data/mquake/mquake_qa_[HOP#]hop.csv --entity2id data/mquake/entity2id.txt   --relation2id data/mquake/relation2id.txt   --question-tokenizer facebook/bart-base   --batch-size 16 --num-epoch 30 --beam-size 16 --max-len [HOP#: in case of nhop, please use 4]   --save-dir model_question_mquake_train_[HOP#]hop   --unfreeze-text-encoder --label-smooth 0.1   --l-punish --self-consistency --no-filter-gen  --test-batch-size 4 --embedding-dim [Embedding Dimension] [--tail-only: True, if you only care about last entity in the path] [--FULL: True trains on a FULL dataset, False trains on a Train dataset]
 ```
 
 To evaluate a trained model (for example, on FB15K237), run the following command. To apply *self-consistency*, add `--self-consistency` command and keep `beam_size = 512`. Add `--output-path` command to observe the top generated correct path by SQUIRE. Remember to modify the --dataset to your desired test dataset name.
@@ -82,3 +87,39 @@ Please cite our paper if you use our method in your work (Bibtex below).
    year={2022}
 }
 ```
+### MQuAKE-ST
+#### Summary Table (Hits@1)
+
+| Model / QA Hop Size        | Graph-Type | 2-Hop   | 3-Hop   | 4-Hop   | n-Hop   |
+| -------------------------- | ---------- | ------- | ------- | ------- | ------- |
+| RW-End                     | Full       | 8.53e-3 | 3.61e-3 | 1.55e-3 | 3.39e-3 |
+| RW-End                     | Train      | 8.53e-3 | 3.61e-3 | 1.56e-3 | 3.40e-3 |
+| RW-Gold                    | Full       | 1.55e-3 | 6.69e-6 | 5.00e-8 | 3.26e-5 |
+| **MINERVA ($d_{KG}$=100)** | Full       | 7.16e-1 | 3.62e-1 | 9.06e-1 | 8.16e-1 |
+| **MINERVA ($d_{KG}$=100)** | Train      | 8.63e-1 | 8.54e-1 | 9.61e-1 | 8.65e-1 |
+| MultiHopKG ($d_{KG}$=100)  | Full       | 4.33e-1 | 4.82e-1 | 3.55e-1 | 2.96e-1 |
+| MultiHopKG ($d_{KG}$=100)  | Train      | 3.72e-1 | 3.51e-1 | 3.26e-1 | 3.47e-1 |
+| **SQUIRE ($d_{KG}$=100)**  | Full       | 8.38e-1 | 8.68e-1 | 6.64e-1 | 8.35e-1 |
+| **SQUIRE ($d_{KG}$=100)**  | Train      | 4.99e-1 | 8.15e-1 | 6.74e-1 | 6.75e-1 |
+
+---
+
+### Test Results for SQUIRE ($d_{KG}$=100) on Full Graph
+
+| QA & Reasoning | Hits@1  | Hits@3  | Hits@5  | Hits@10     | Hits@20 | MRR         |
+| -------------- | ------- | ------- | ------- | ----------- | ------- | ----------- |
+| **2-Hop**      | 8.75e-1 | 9.42e-1 | 9.62e-1 | 9.94e-1 | 9.99e-1 | 9.16e-1 | 
+| **3-Hop**      | 9.18e-1 | 9.42e-1 | 9.49e-1 | 9.51e-1 | 9.52e-1 | 9.30e-1 |
+| **4-Hop**      | 9.42e-1 | 9.60e-1 | 9.63e-1 | 9.63e-1 | 9.64e-1 | 9.51e-1 |
+| **n-Hop**      | 8.80e-1 | 8.62e-1 | 8.80e-1 | 8.89e-1 | 8.90e-1 | 8.35e-1 |
+
+---
+
+### Test Results for SQUIRE ($d_{KG}$=100) on Train Graph
+
+| QA & Reasoning | Hits@1  | Hits@3  | Hits@5  | Hits@10     | Hits@20 | MRR         |
+| -------------- | ------- | ------- | ------- | ----------- | ------- | ----------- |
+| **2-Hop**      | 4.68e-1 | 6.21e-1 | 6.64e-1 | 7.09e-1 | 7.13e-1 | 5.53e-1 |
+| **3-Hop**      | 5.35e-1 | 7.67e-1 | 7.83e-1 | 8.11e-1 | 8.11e-1 | 6.44e-1 |
+| **4-Hop**      | 7.95e-1 | 9.33e-1 | 9.44e-1 | 9.44e-1 | 9.50e-1 | 8.63e-1 |
+| **n-Hop**      | 6.38e-1 | 7.33e-1 | 7.56e-1 | 7.79e-1 | 7.82e-1 | 6.90e-1 |

@@ -1,0 +1,16 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+
+# Datasets
+data/*
+
+# Models and checkpoints
+models/
+models_new/
+AnyBURL/path1/
+
+# IDE / temp files
+*.swp
+*.swo
+.DS_Store
