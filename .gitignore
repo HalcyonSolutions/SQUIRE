@@ -14,3 +14,6 @@ AnyBURL/path1/
 *.swp
 *.swo
 .DS_Store
+
+# Scripts
+count_params.py
