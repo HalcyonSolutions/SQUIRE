@@ -72,6 +72,12 @@ CUDA_VISIBLE_DEVICES=0 python train.py --dataset NELL23K --embedding-dim 256 --h
 CUDA_LAUNCH_BLOCKING=1 python train_question_input.py   --dataset mquake   --csv-path data/mquake/mquake_qa_[HOP#]hop.csv --entity2id data/mquake/entity2id.txt   --relation2id data/mquake/relation2id.txt   --question-tokenizer facebook/bart-base   --batch-size 16 --num-epoch 30 --beam-size 16 --max-len [HOP#: in case of nhop, please use 4]   --save-dir model_question_mquake_train_[HOP#]hop   --unfreeze-text-encoder --label-smooth 0.1   --l-punish --self-consistency --no-filter-gen  --test-batch-size 4 --embedding-dim [Embedding Dimension] [--tail-only: True, if you only care about last entity in the path] [--FULL: True trains on a FULL dataset, False trains on a Train dataset]
 ```
 
+**Run kinshiphinton_final training on question inputs (Example with embedding size 12)**
+```
+CUDA_LAUNCH_BLOCKING=1 python train_question_input.py --dataset kinshiphinton_final --csv-path data/kinshiphinton_final/kinship_hinton_qa_2hop.csv --entity2id data/kinshiphinton_final/entity2id.txt   --relation2id data/kinshiphinton_final/relation2id.txt   --question-tokenizer facebook/bart-base   --batch-size 16 --num-epoch 30 --beam-size 16 --max-len 2   --save-dir kinshiphinton_final_Qinput_train_2hop   --unfreeze-text-encoder --label-smooth 0.1   --l-punish --self-consistency --no-filter-gen  --test-batch-size 4 --embedding-dim 12 --tail-only --FULL
+```
+
+**Run evaluation (without training)**
 To evaluate a trained model (for example, on FB15K237), run the following command. To apply *self-consistency*, add `--self-consistency` command and keep `beam_size = 512`. Add `--output-path` command to observe the top generated correct path by SQUIRE. Remember to modify the --dataset to your desired test dataset name.
 ```
 CUDA_VISIBLE_DEVICES=0 python train.py --test --dataset FB15K237 --beam-size 256 --save-dir "model_1" --ckpt "ckpt_30.pt" --test-batch-size 8 --encoder --l-punish --no-filter-gen
@@ -125,3 +131,29 @@ Please cite our paper if you use our method in your work (Bibtex below).
 | **3-Hop**      | 5.35e-1 | 7.67e-1 | 7.83e-1 | 8.11e-1 | 8.11e-1 | 6.44e-1 |
 | **4-Hop**      | 7.95e-1 | 9.33e-1 | 9.44e-1 | 9.44e-1 | 9.50e-1 | 8.63e-1 |
 | **n-Hop**      | 6.38e-1 | 7.33e-1 | 7.56e-1 | 7.79e-1 | 7.82e-1 | 6.90e-1 |
+
+---
+
+### Kinship-Hinton
+
+---
+
+### Test Results for SQUIRE ($d_{KG}$=12) on Full Graph 
+
+| QA & Reasoning | Hits@1  | Hits@3  | Hits@5  | Hits@10     | Hits@20 | MRR         |
+| -------------- | ------- | ------- | ------- | ----------- | ------- | ----------- |
+| **1-Hop**      | 0.0000 | 0.0179 | 0.1518 | 0.4375 | 0.6071 | 0.0876 |
+| **2-Hop**      | 0.0887 | 0.2621 | 0.4315 | 0.5847 | 0.7056 | 0.2225 | 
+| **3-Hop**      | 0.3738 | 0.6524 | 0.7452 | 0.8905 | 0.9310 | 0.5431 |
+| **n-Hop**      | 0.4449 | 0.5859 | 0.6628 | 0.8179 | 0.8846 | 0.5480 |
+
+---
+
+### Test Results for SQUIRE ($d_{KG}$=12) on Train Graph 
+
+| QA & Reasoning | Hits@1  | Hits@3  | Hits@5  | Hits@10     | Hits@20 | MRR         |
+| -------------- | ------- | ------- | ------- | ----------- | ------- | ----------- |
+| **1-Hop**      | 0.0000 | 0.0000 | 0.0938 | 0.2500 | 0.4062 | 0.0524 |
+| **2-Hop**      | 0.0484 | 0.0806 | 0.1452 | 0.4032 | 0.6129 | 0.1288 | 
+| **3-Hop**      | 0.3905 | 0.5429 | 0.7048 | 0.8190 | 0.9238 | 0.5069 |
+| **n-Hop**      | 0.3769 | 0.4673 | 0.5578 | 0.6884 | 0.7839 | 0.4591 |
