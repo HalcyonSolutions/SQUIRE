@@ -64,12 +64,17 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         v = model.dictionary.indices[k]
         rev_dict[v] = k
     with tqdm(dataloader, desc="testing") as pbar:
-        for samples in pbar:
+        for sample_ind, samples in enumerate(pbar):
             pbar.set_description("MRR: %f, Hit@1: %f, Hit@3: %f, Hit@10: %f" % (mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count)))
             batch_size = samples["source"].size(0)
             candidates = [dict() for i in range(batch_size)]
             candidates_path = [dict() for i in range(batch_size)]
+
+            #* Input of a model `train.py`
             source = samples["source"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
+            if sample_ind < 5:
+                print(f"source:\n{source}")
+
             prefix = torch.zeros([batch_size, beam_size, max_len], dtype=torch.long).to(device)
             prefix[:, :, 0].fill_(model.dictionary.bos())
             lprob = torch.zeros([batch_size, beam_size]).to(device)
@@ -97,7 +102,12 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             prefix[:, :, 1] = argsort[:, :]
             lprob += torch.gather(input=logits, dim=-1, index=argsort)
             clen += 1
+            
+            #* Expected output of a model
             target = samples["target"].cpu()
+            if sample_ind < 5:
+                print(f"target:\n{target}")
+
             for l in range(2, max_len):
                 tmp_prefix = prefix.unsqueeze(dim=2).repeat(1, 1, beam_size, 1)
                 tmp_lprob = lprob.unsqueeze(dim=-1).repeat(1, 1, beam_size)    
@@ -236,7 +246,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
 
 def train(args):
     args.dataset = os.path.join('data', args.dataset)
-    save_path = os.path.join('models_new', args.save_dir)
+    save_path = os.path.join('models', args.save_dir)
     ckpt_path = os.path.join(save_path, 'checkpoint')
     if not os.path.exists(save_path):
         os.mkdir(save_path)
@@ -328,7 +338,7 @@ def train(args):
 
 def checkpoint(args):
     args.dataset = os.path.join('data', args.dataset)
-    save_path = os.path.join('models_new', args.save_dir)
+    save_path = os.path.join('models', args.save_dir)
     ckpt_path = os.path.join(save_path, 'checkpoint')
     if not os.path.exists(ckpt_path):
         print("Invalid path!")

@@ -62,7 +62,7 @@ def get_args():
     # misc
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--test-only", action="store_true")
-    p.add_argument("--load-ckpt", type=str, default="", help="Path to checkpoint to eval (e.g. models_new/..../ckpt_30.pt)")
+    p.add_argument("--load-ckpt", type=str, default="", help="Path to checkpoint to eval (e.g. models/..../ckpt_30.pt)")
     p.add_argument("--FULL", action="store_true")
     return p.parse_args()
 
