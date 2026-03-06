@@ -2,6 +2,7 @@
 import os, ast, csv
 import math
 import logging
+logger = logging.getLogger(__name__)
 import argparse
 from typing import Tuple
 import torch
@@ -18,6 +19,7 @@ from dataset import Seq2SeqDataset as _LegacySeq2Seq  # for valid mask builders
 # from QA_Dataloader import make_train_test_dataloaders_streaming as make_train_test_dataloaders
 from QA_Dataloader import make_train_test_dataloaders
 from QA_Dataloader import load_index_column_wise  # <- your loader
+import warnings
 
 
 if torch.cuda.is_available():
@@ -64,6 +66,7 @@ def get_args():
     p.add_argument("--test-only", action="store_true")
     p.add_argument("--load-ckpt", type=str, default="", help="Path to checkpoint to eval (e.g. models/..../ckpt_30.pt)")
     p.add_argument("--FULL", action="store_true")
+    p.add_argument("-v", "--verbose", action="store_true", help="If True the code logs in debug mode")
     return p.parse_args()
 
 def set_seed(seed: int):
@@ -676,7 +679,7 @@ def generate_path_for_question(model, dictionary, question_ids, question_mask, m
 
 
 
-def train(args):
+def train(args, device:str) -> None:
     set_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -729,22 +732,6 @@ def train(args):
     )
     test_question_ids = test_tok["input_ids"].to(device)
     test_question_mask = test_tok["attention_mask"].to(device)
-
-
-    # hf_params = []
-    # base_params = []
-    # for n,p in model.named_parameters():
-    #     if "text_model" in n:
-    #         hf_params.append(p)
-    #     else:
-    #         base_params.append(p)
-
-    # optimizer = optim.Adam(
-    #     [
-    #     {"params": base_params, "lr": args.lr, "weight_decay": args.weight_decay},
-    #     {"params": hf_params,   "lr": min(args.lr, 5e-5), "weight_decay": 0.0},
-    #     ]
-    # )
 
     hf_params, base_params = [], []
     for n, p in model.named_parameters():
@@ -802,14 +789,23 @@ def train(args):
             print(" → ".join(path))
             
 
-def main():
-    args = get_args()
-    if not args.test_only:
-        train(args)
-        return
+def main(args) -> None:
+    # TODO: setup a test_only mode, after train works
+    # if not args.test_only:
+    #     train(args)
+    #     return
 
-    # -------- test-only path --------
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        warnings.warn(
+            "CUDA not available. Simulation will run much slower on CPU.",
+            UserWarning
+        )
+    logger.info(f"Using device: {device}")
+
+    train(args, device)
+
     # masks + dictionary
     train_valid, eval_valid, dictionary = _build_train_valid_masks(args, device)
     # entity/relation maps
@@ -840,5 +836,28 @@ def main():
     model.load_state_dict(state, strict=True)
     evaluate(model, test_dl, device, args, train_valid, eval_valid, dictionary)
 
+    # interpret the path
+    if args.output_path:
+        filename = "test_output_squire_question.txt"
+
+
 if __name__ == "__main__":
-    main()
+    args = get_args()
+    if args.verbose:
+        print(f"Logs will be saved into {args.save_dir}/question_input.log")
+
+    # logging system works like a global registry of loggers
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        filename="app.log",
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
+    logger.info("Started")
+    params = "\n".join(f"   {k}: {v}" for k, v in vars(args).items()) # space for better formatting
+    logger.info("Experiment parameters:\n%s", params)
+
+    main(args)
+
+    logger.info("Finished")
