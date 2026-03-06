@@ -1,8 +1,16 @@
-# train_question_input.py
+"""
+    Train SQUIRE on question input
+    Question input: sentence as a string
+"""
+
 import os, ast, csv
 import math
+
+# setup logging
 import logging
+from utils.custom_logging import CustomFormatter
 logger = logging.getLogger(__name__)
+
 import argparse
 from typing import Tuple
 import torch
@@ -680,8 +688,8 @@ def generate_path_for_question(model, dictionary, question_ids, question_mask, m
 
 
 def train(args, device:str) -> None:
+    logger.info(f"training started with the seed: {args.seed}")
     set_seed(args.seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # --- Build masks + dictionary from the SQUIRE data folder ---
     train_valid, eval_valid, dictionary = _build_train_valid_masks(args, device)
@@ -848,13 +856,12 @@ if __name__ == "__main__":
 
     # logging system works like a global registry of loggers
     level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        filename="app.log",
-        level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    logger.setLevel(level)
+    file_handler = logging.FileHandler("question_input.log")
+    file_handler.setFormatter(CustomFormatter())
+    logger.addHandler(file_handler)
 
-    logger.info("Started")
+    logger.info("Started in DEBUG mode") if args.verbose else logger.info("Started in INFO mode")
     params = "\n".join(f"   {k}: {v}" for k, v in vars(args).items()) # space for better formatting
     logger.info("Experiment parameters:\n%s", params)
 
