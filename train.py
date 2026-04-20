@@ -284,6 +284,8 @@ def train(args):
                     "[Iter0: %d] [Iter1: %d] [Iter2: %d]"
                     % (iter_epoch[0], iter_epoch[1], iter_epoch[2])
                     )
+    best_hit1 = -float("inf")
+    best_epoch = -1
     steps = 0
     for epoch in range(args.num_epoch):
         if args.iter:
@@ -321,10 +323,22 @@ def train(args):
                 "[Epoch %d/%d] [train loss: %f]"
                 % (epoch + 1, args.num_epoch, np.mean(losses))
                 )
-        if (epoch % args.save_interval == 0 and epoch != 0) or (epoch == args.num_epoch - 1):
-            torch.save(model.state_dict(), ckpt_path + "/ckpt_{}.pt".format(epoch + 1))
-            with torch.no_grad():
-                evaluate(model, test_loader, device, args, train_valid, eval_valid)
+        with torch.no_grad():
+            _, hit1, _, _ = evaluate(model, test_loader, device, args, train_valid, eval_valid)
+
+        if hit1 > best_hit1:
+            best_hit1 = hit1
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), ckpt_path + "/best_model.pt".format(best_epoch))
+            logging.info("[Checkpoint Saved] [Epoch: %d] [Best Hit@1: %f]", best_epoch, best_hit1)
+        else:
+            logging.info(
+                "[Checkpoint Skipped] [Epoch: %d] [Hit@1: %f] [Best Epoch: %d] [Best Hit@1: %f]",
+                epoch + 1,
+                hit1,
+                best_epoch,
+                best_hit1,
+            )
 
 def checkpoint(args):
     args.dataset = os.path.join('data', args.dataset)
