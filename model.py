@@ -144,6 +144,8 @@ class TransformerModel(nn.Module):
             output = self.enencoder(torch.cat((source, prev_outputs), dim=0), mask=enmask)[src_len:, :, :].transpose(0, 1)
         else:
             mask = mask.to(device)
+            #! endecoder module doesn't exist 
+            #! run the code with encoder only
             output = self.endecoder(source, prev_outputs, tgt_mask=mask).transpose(0, 1)
         logits = torch.mm(self.glue(self.fc(output)).view(-1, self.ninp), self.encoder.weight.transpose(0, 1)).view(bsz, out_len, -1)
         return logits
