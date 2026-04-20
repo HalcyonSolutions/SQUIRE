@@ -9,11 +9,16 @@ data/*
 models/
 models_new/
 AnyBURL/path1/
+AnyBURL/path_kinship/
 
 # IDE / temp files
 *.swp
 *.swo
 .DS_Store
 
-# Scripts
+# Misc
 count_params.py
+local/
+
+# Temp
+test_output_squire.txt
