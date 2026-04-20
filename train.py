@@ -13,6 +13,10 @@ import logging
 import transformers
 from iterative_training import Iter_trainer
 import math
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -232,7 +236,31 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         with open("test_output_squire.txt", "w") as f:
             f.writelines(lines)
     logging.info("[MRR: %f] [Hit@1: %f] [Hit@3: %f] [Hit@10: %f]" % (mrr/count, hit1/count, hit3/count, hit10/count))
-    return hit/count, hit1/count, hit3/count, hit10/count
+    return mrr/count, hit1/count, hit3/count, hit10/count
+
+
+def plot_epoch_metrics(metric_history, save_dir):
+    epochs = metric_history["epoch"]
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+    metric_specs = [
+        ("mrr", "MRR"),
+        ("hit1", "Hit@1"),
+        ("hit3", "Hit@3"),
+        ("hit10", "Hit@10"),
+    ]
+
+    for ax, (key, title) in zip(axes.flat, metric_specs):
+        ax.plot(epochs, metric_history[f"train_{key}"], label="Train", linewidth=2)
+        ax.plot(epochs, metric_history[f"valid_{key}"], label="Valid", linewidth=2)
+        ax.set_title(title)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Score")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_dir, "training_metrics.png"), dpi=200)
+    plt.close(fig)
 
 def train(args):
     args.dataset = os.path.join('data', args.dataset)
@@ -253,10 +281,12 @@ def train(args):
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, args=args)
     valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt")
     test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt")
+    train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt")
     train_valid, eval_valid = train_set.get_next_valid()
     train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True)
     valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
     test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
+    train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False)
     
     model = TransformerModel(args, train_set.dictionary).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -265,7 +295,6 @@ def train(args):
     warmup_steps = total_step_num / args.warmup
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, total_step_num)
     
-    # evaluate(model, test_loader, device, args, train_valid, eval_valid)
     if args.iter:
         iter_trainer = Iter_trainer(args.dataset, args.iter_batch_size, 32, 4)
         iter_epoch = []
@@ -286,6 +315,17 @@ def train(args):
                     )
     best_hit1 = -float("inf")
     best_epoch = -1
+    metric_history = {
+        "epoch": [],
+        "train_mrr": [],
+        "valid_mrr": [],
+        "train_hit1": [],
+        "valid_hit1": [],
+        "train_hit3": [],
+        "valid_hit3": [],
+        "train_hit10": [],
+        "valid_hit10": [],
+    }
     steps = 0
     for epoch in range(args.num_epoch):
         if args.iter:
@@ -324,10 +364,37 @@ def train(args):
                 % (epoch + 1, args.num_epoch, np.mean(losses))
                 )
         with torch.no_grad():
-            _, hit1, _, _ = evaluate(model, valid_loader, device, args, train_valid, eval_valid)
+            train_mrr, train_hit1, train_hit3, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid)
+            valid_mrr, valid_hit1, valid_hit3, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid)
 
-        if hit1 > best_hit1:
-            best_hit1 = hit1
+        metric_history["epoch"].append(epoch + 1)
+        metric_history["train_mrr"].append(train_mrr)
+        metric_history["valid_mrr"].append(valid_mrr)
+        metric_history["train_hit1"].append(train_hit1)
+        metric_history["valid_hit1"].append(valid_hit1)
+        metric_history["train_hit3"].append(train_hit3)
+        metric_history["valid_hit3"].append(valid_hit3)
+        metric_history["train_hit10"].append(train_hit10)
+        metric_history["valid_hit10"].append(valid_hit10)
+
+        # plot_epoch_metrics(metric_history, save_path)
+
+        logging.info(
+            "[Epoch %d Metrics] [Train MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f] "
+            "[Valid MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f]",
+            epoch + 1,
+            train_mrr,
+            train_hit1,
+            train_hit3,
+            train_hit10,
+            valid_mrr,
+            valid_hit1,
+            valid_hit3,
+            valid_hit10,
+        )
+
+        if valid_hit1 > best_hit1:
+            best_hit1 = valid_hit1
             best_epoch = epoch + 1
             torch.save(model.state_dict(), ckpt_path + "/best_model.pt".format(best_epoch))
             logging.info("[Checkpoint Saved] [Epoch: %d] [Best Hit@1: %f]", best_epoch, best_hit1)
@@ -335,10 +402,12 @@ def train(args):
             logging.info(
                 "[Checkpoint Skipped] [Epoch: %d] [Hit@1: %f] [Best Epoch: %d] [Best Hit@1: %f]",
                 epoch + 1,
-                hit1,
+                valid_hit1,
                 best_epoch,
                 best_hit1,
             )
+
+    plot_epoch_metrics(metric_history, save_path)
 
 def checkpoint(args):
     args.dataset = os.path.join('data', args.dataset)
