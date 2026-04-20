@@ -15,10 +15,9 @@ AnyBURL/path_kinship/
 *.swp
 *.swo
 .DS_Store
+.vscode/
+test_output_squire.txt
 
 # Misc
 count_params.py
 local/
-
-# Temp
-test_output_squire.txt
