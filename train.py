@@ -324,7 +324,7 @@ def train(args):
                 % (epoch + 1, args.num_epoch, np.mean(losses))
                 )
         with torch.no_grad():
-            _, hit1, _, _ = evaluate(model, test_loader, device, args, train_valid, eval_valid)
+            _, hit1, _, _ = evaluate(model, valid_loader, device, args, train_valid, eval_valid)
 
         if hit1 > best_hit1:
             best_hit1 = hit1
