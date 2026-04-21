@@ -377,8 +377,6 @@ def train(args):
         metric_history["train_hit10"].append(train_hit10)
         metric_history["valid_hit10"].append(valid_hit10)
 
-        # plot_epoch_metrics(metric_history, save_path)
-
         logging.info(
             "[Epoch %d Metrics] [Train MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f] "
             "[Valid MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f]",

@@ -226,7 +226,7 @@ class Dictionary(object):
         if reverse_order:
             words = list(reversed(words))
         nwords = len(words)
-        ids = torch.IntTensor(nwords + 1 if append_eos else nwords)
+        ids = torch.IntTensor(nwords + 1 if append_eos else nwords) #? random initialization?
 
         for i, word in enumerate(words):
             if add_if_not_exist:
@@ -238,6 +238,12 @@ class Dictionary(object):
             ids[i] = idx
         if append_eos:
             ids[nwords] = self.eos_index
+
+        # ids are the numeric token IDs produced 
+        # by mapping each token in the input sequence 
+        # through the dictionary.
+        # for example on kinshiphinton_final dataset: 
+        # ["0", "R0"] -> [32, 6, 2] which corresponds to index in vocab.txt
         return ids
 
     def _save(self, f, kv_iterator):

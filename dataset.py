@@ -20,8 +20,8 @@ class Seq2SeqDataset(Dataset):
             self.tgt_file = os.path.join(data_path, "out_"+args.trainset+".txt")
             
         with open(self.src_file) as fsrc, open(self.tgt_file) as ftgt:
-            self.src_lines = fsrc.readlines()
-            self.tgt_lines = ftgt.readlines()
+            self.src_lines = fsrc.readlines() # data from in_#_rev_rule file | corresponds to # of rows
+            self.tgt_lines = ftgt.readlines() # data from out_#_rev_rule file | corresponds to # of rows
 
         assert len(self.src_lines) == len(self.tgt_lines)
         self.vocab_file = vocab_file
@@ -49,7 +49,7 @@ class Seq2SeqDataset(Dataset):
         with open(self.data_path+'relation2id.txt') as fin:
             for line in fin:
                 r, rid = line.strip().split('\t')
-                rev_rid = int(rid) + N
+                rev_rid = int(rid) + N # adding reverse relations IDs
                 self.dictionary.add_symbol('R'+rid)
                 self.dictionary.add_symbol('R'+str(rev_rid))
         with open(self.data_path+'entity2id.txt') as fin:
@@ -83,7 +83,7 @@ class Seq2SeqDataset(Dataset):
         lens = [sample["tgt_length"] for sample in samples]
         max_len = max(lens)
         bsz = len(lens)
-        source = torch.LongTensor(bsz, 3)
+        source = torch.LongTensor(bsz, 3) # bos, head, relation -> constant input length
         prev_outputs = torch.LongTensor(bsz, max_len)
         mask = torch.zeros(bsz, max_len)
 
