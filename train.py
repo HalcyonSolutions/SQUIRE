@@ -74,19 +74,21 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     with tqdm(dataloader, desc="testing") as pbar:
         for samples in pbar:
             pbar.set_description("MRR: %f, Hit@1: %f, Hit@3: %f, Hit@10: %f" % (mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count)))
-            batch_size = samples["source"].size(0)
+            batch_size = samples["input_ids"].size(0)
             candidates = [dict() for i in range(batch_size)]
             candidates_path = [dict() for i in range(batch_size)]
-            source = samples["source"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
+            input_ids = samples["input_ids"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
+            attention_mask = samples["attention_mask"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
             prefix = torch.zeros([batch_size, beam_size, max_len], dtype=torch.long).to(device)
             prefix[:, :, 0].fill_(model.dictionary.bos())
             lprob = torch.zeros([batch_size, beam_size]).to(device)
             clen = torch.zeros([batch_size, beam_size], dtype=torch.long).to(device)
             # first token: choose beam_size from only vocab_size, initiate prefix
-            tmp_source = samples["source"]
+            tmp_input_ids = samples["input_ids"]
+            tmp_attention_mask = samples["attention_mask"]
             tmp_prefix = torch.zeros([batch_size, 1], dtype=torch.long).to(device)
             tmp_prefix[:, 0].fill_(model.dictionary.bos())
-            logits = model.logits(tmp_source, tmp_prefix).squeeze()
+            logits = model.logits(tmp_input_ids, tmp_attention_mask, tmp_prefix).squeeze()
             if args.no_filter_gen:
                 logits = F.log_softmax(logits, dim=-1)
             else:
@@ -111,7 +113,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 tmp_lprob = lprob.unsqueeze(dim=-1).repeat(1, 1, beam_size)    
                 tmp_clen = clen.unsqueeze(dim=-1).repeat(1, 1, beam_size)
                 bb = batch_size * beam_size
-                all_logits = model.logits(source.view(bb, -1), prefix.view(bb, -1)).view(batch_size, beam_size, max_len, -1)
+                all_logits = model.logits(input_ids.view(bb, -1), attention_mask.view(bb, -1), prefix.view(bb, -1)).view(batch_size, beam_size, max_len, -1)
                 logits = torch.gather(input=all_logits, dim=2, index=clen.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 1, vocab_size)).squeeze(2)
                 # restrict to true_triples, compute index for true_triples
                 if args.no_filter_gen:
@@ -283,9 +285,9 @@ def train(args):
     logging.info(args)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, args=args)
-    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt")
-    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt")
-    train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt")
+    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", args=args)
+    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", args=args)
+    train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", args=args)
     train_valid, eval_valid = train_set.get_next_valid()
     train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True)
     valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
@@ -426,7 +428,7 @@ def checkpoint(args):
                     )
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, args=args)
-    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt")
+    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", args=args)
     test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
     train_valid, eval_valid = train_set.get_next_valid()
     model = TransformerModel(args, train_set.dictionary)
