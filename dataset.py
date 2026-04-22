@@ -9,21 +9,28 @@ import numpy as np
 import networkx as nx
 from tqdm import tqdm
 import random
+import pandas as pd
+from transformers import BertTokenizer
+import ast
 
 class Seq2SeqDataset(Dataset):
+    _tokenizer = None
+
     def __init__(self, data_path="FB15K237/", vocab_file="FB15K237/vocab.txt", device="cpu", args=None):
         self.data_path = data_path
-        self.src_file = os.path.join(data_path, "in_"+args.trainset+".txt")
-        if args.loop:
-            self.tgt_file = os.path.join(data_path, "out_"+args.trainset+"_loop.txt")
-        else:
-            self.tgt_file = os.path.join(data_path, "out_"+args.trainset+".txt")
-            
-        with open(self.src_file) as fsrc, open(self.tgt_file) as ftgt:
-            self.src_lines = fsrc.readlines() # data from in_#_rev_rule file | corresponds to # of rows
-            self.tgt_lines = ftgt.readlines() # data from out_#_rev_rule file | corresponds to # of rows
 
-        assert len(self.src_lines) == len(self.tgt_lines)
+        csv_file = getattr(args, "question_file", None)
+        self.csv_file =os.path.join(data_path, csv_file) if csv_file else None 
+        if self.csv_file is None:
+            raise ValueError("args.question_file is required")
+
+        self.data = pd.read_csv(self.csv_file)
+
+        if Seq2SeqDataset._tokenizer is None:
+            Seq2SeqDataset._tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        self.tokenizer = Seq2SeqDataset._tokenizer
+
+        self.max_q_len = getattr(args, "max_q_len", 32)
         self.vocab_file = vocab_file
         self.device = device
     
@@ -32,13 +39,15 @@ class Seq2SeqDataset(Dataset):
         except FileNotFoundError:
             self.dictionary = Dictionary()
             self._init_vocab()
+        self._load_mappings()
+
         self.padding_idx = self.dictionary.pad()
         self.len_vocab = len(self.dictionary)
         self.smart_filter = args.smart_filter
         self.args = args
     
     def __len__(self):
-        return len(self.src_lines)
+        return len(self.data)
 
     def _init_vocab(self):
         self.dictionary.add_symbol('LOOP')
@@ -57,12 +66,53 @@ class Seq2SeqDataset(Dataset):
                 e, eid = line.strip().split('\t')
                 self.dictionary.add_symbol(eid)
         self.dictionary.save(self.vocab_file)
+    
+    def _load_mappings(self):
+        self.entity2id = {}
+        with open(self.data_path + "entity2id.txt") as f:
+            for line in f:
+                e, eid = line.strip().split('\t')
+                self.entity2id[e] = eid
+
+        self.relation2id = {}
+        with open(self.data_path + "relation2id.txt") as f:
+            for line in f:
+                r, rid = line.strip().split('\t')
+                self.relation2id[r] = 'R' + rid
 
     def __getitem__(self, index):
-        src_line = self.src_lines[index].strip().split(' ')
-        tgt_line = self.tgt_lines[index].strip().split(' ')
-        source_id = self.dictionary.encode_line(src_line)
-        target_id = self.dictionary.encode_line(tgt_line)
+        row = self.data.iloc[index]
+        question = str(row["Question"])
+
+        paths = ast.literal_eval(row["Paths"])
+        tgt_line = []
+        for i, hop in enumerate(paths):
+            if i == 0:
+                tgt_line.extend(hop)
+            else:
+                tgt_line.extend(hop[1:])
+        tgt_line_ids = []
+        for i, token in enumerate(tgt_line):
+            if i % 2 == 0:  # entity
+                try:
+                    tgt_line_ids.append(self.entity2id[token])
+                except KeyError:
+                    raise ValueError(f"Unknown entity: {token}")
+            else:  # relation
+                try:
+                    tgt_line_ids.append(self.relation2id[token])
+                except KeyError:
+                    raise ValueError(f"Unknown relation: {token}")
+
+        encoded_question = self.tokenizer(
+            question,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_q_len,
+            return_tensors='pt'
+        )
+
+        target_id = self.dictionary.encode_line(tgt_line_ids)
         l = len(target_id)
         mask = torch.ones_like(target_id)
         for i in range(0, l-2):
@@ -74,7 +124,8 @@ class Seq2SeqDataset(Dataset):
         return {
             "id": index,
             "tgt_length": len(target_id),
-            "source": source_id,
+            "input_ids": encoded_question["input_ids"].squeeze(0),
+            "attention_mask": encoded_question["attention_mask"].squeeze(0),
             "target": target_id,
             "mask": mask,
         }
@@ -83,11 +134,15 @@ class Seq2SeqDataset(Dataset):
         lens = [sample["tgt_length"] for sample in samples]
         max_len = max(lens)
         bsz = len(lens)
-        source = torch.LongTensor(bsz, 3) # bos, head, relation -> constant input length
+
+        # input_ids = torch.LongTensor(bsz, self.max_q_len)
+        # attention_mask = torch.LongTensor(bsz, self.max_q_len)
+        input_ids = torch.stack([s["input_ids"] for s in samples])
+        attention_mask = torch.stack([s["attention_mask"] for s in samples])
+
         prev_outputs = torch.LongTensor(bsz, max_len)
         mask = torch.zeros(bsz, max_len)
-
-        source[:, 0].fill_(self.dictionary.bos())
+ 
         prev_outputs.fill_(self.dictionary.pad())
         prev_outputs[:, 0].fill_(self.dictionary.bos())
         target = copy.deepcopy(prev_outputs)
@@ -95,10 +150,9 @@ class Seq2SeqDataset(Dataset):
         ids =  []
         for idx, sample in enumerate(samples):
             ids.append(sample["id"])
-            source_ids = sample["source"]
             target_ids = sample["target"]
-
-            source[idx, 1:] = source_ids[: -1]
+            input_ids[idx] = sample["input_ids"]
+            attention_mask[idx] = sample["attention_mask"]
             prev_outputs[idx, 1:sample["tgt_length"]] = target_ids[: -1]
             target[idx, 0: sample["tgt_length"]] = target_ids
             mask[idx, 0: sample["tgt_length"]] = sample["mask"]
@@ -106,7 +160,8 @@ class Seq2SeqDataset(Dataset):
         return {
             "ids": torch.LongTensor(ids).to(self.device),
             "lengths": torch.LongTensor(lens).to(self.device),
-            "source": source.to(self.device),
+            "input_ids": input_ids.to(self.device),
+            "attention_mask": attention_mask.to(self.device),
             "prev_outputs": prev_outputs.to(self.device),
             "target": target.to(self.device),
             "mask": mask.to(self.device),

@@ -49,6 +49,10 @@ def get_args():
     parser.add_argument("--warmup", default=3, type=float) # warmup steps ratio
     parser.add_argument("--self-consistency", default=False, action="store_true") # self-consistency
     parser.add_argument("--output-path", default=False, action="store_true") # output top correct path in a file (for interpretability evaluation)
+    
+    # question input related
+    parser.add_argument("--question-file", default="./data/kinshiphinton_final/kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
+    parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
     args = parser.parse_args()
     return args
 
