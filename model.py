@@ -105,7 +105,8 @@ class TransformerModel(nn.Module):
         self.src_mask = None
         self.ninp = args.embedding_dim
         self.args = args
-        self.pos_encoder = PositionalEncoding(self.ninp)
+        # self.pos_encoder = PositionalEncoding(self.ninp)
+        self.pos_encoder = PositionalEncoding(self.ninp, max_seq_len=512)
         encoder_layers = nn.TransformerEncoderLayer(d_model=args.embedding_dim, nhead=4, dim_feedforward=args.hidden_size, dropout=args.dropout)
         self.enencoder = nn.TransformerEncoder(encoder_layers, args.num_layers)
         self.ntoken = len(dictionary)
@@ -133,14 +134,14 @@ class TransformerModel(nn.Module):
 
     def logits(self, input_ids, attention_mask, prev_outputs, **unused):
         bsz = input_ids.size(0)
-        src_len = 1
         out_len = prev_outputs.size(1)
         device = input_ids.device
         with torch.no_grad():
             bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        cls_repr = bert_outputs.last_hidden_state[:, 0, :]
-        source = self.bert_proj(cls_repr)
-        source = source.unsqueeze(0)
+        bert_seq = bert_outputs.last_hidden_state
+        source = self.bert_proj(bert_seq)
+        source = source.transpose(0, 1)
+        src_len = source.size(0)
         source += self.pos_encoder(bsz, 0, src_len)
         source = source.to(device)
         mask = self._generate_square_subsequent_mask(prev_outputs.size(-1))
