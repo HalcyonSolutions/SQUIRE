@@ -16,7 +16,7 @@ import ast
 class Seq2SeqDataset(Dataset):
     _tokenizer = None
 
-    def __init__(self, data_path="FB15K237/", vocab_file="FB15K237/vocab.txt", device="cpu", args=None):
+    def __init__(self, data_path="FB15K237/", vocab_file="FB15K237/vocab.txt", device="cpu", args=None, split: str = None):
         self.data_path = data_path
 
         csv_file = getattr(args, "question_file", None)
@@ -25,6 +25,8 @@ class Seq2SeqDataset(Dataset):
             raise ValueError("args.question_file is required")
 
         self.data = pd.read_csv(self.csv_file)
+        if split is not None:
+            self.data = self.data[self.data["SplitLabel"] == split].reset_index(drop=True)
 
         if Seq2SeqDataset._tokenizer is None:
             Seq2SeqDataset._tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
@@ -257,16 +259,20 @@ class Seq2SeqDataset(Dataset):
         return train_valid, eval_valid
                 
 class TestDataset(Dataset):
-    def __init__(self, data_path="FB15K237/", vocab_file="FB15K237/vocab.txt", device="cpu", src_file=None):
+    def __init__(self, data_path="FB15K237/", vocab_file="FB15K237/vocab.txt", device="cpu", src_file=None, args=None, split: str = None):
+        self.data_path = data_path
+        csv_file = getattr(args, "question_file", None)
+        self.csv_file = os.path.join(data_path, csv_file) if csv_file else None
+        if self.csv_file is None:
+            raise ValueError("args.question_file is required")
 
-        if src_file:
-            self.src_file = os.path.join(data_path, src_file)
-        else:
-            self.src_file = os.path.join(data_path, "valid_triples.txt")
-            
-        with open(self.src_file) as f:
-            self.src_lines = f.readlines()
-
+        self.data = pd.read_csv(self.csv_file)
+        if split is not None:
+            self.data = self.data[self.data["SplitLabel"] == split].reset_index(drop=True)
+        if Seq2SeqDataset._tokenizer is None:
+            Seq2SeqDataset._tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        self.tokenizer = Seq2SeqDataset._tokenizer
+        self.max_q_len = getattr(args, "max_q_len", 32)
         self.vocab_file = vocab_file
         self.device = device
     
@@ -275,40 +281,57 @@ class TestDataset(Dataset):
         except FileNotFoundError:
             self.dictionary = Dictionary()
             self._init_vocab()
+        self.entity2id = {}
+        with open(self.data_path + "entity2id.txt") as f:
+            for line in f:
+                e, eid = line.strip().split('\t')
+                self.entity2id[e] = eid
         self.padding_idx = self.dictionary.pad()
         self.len_vocab = len(self.dictionary)
 
     def __len__(self):
-        return len(self.src_lines)
+        return len(self.data)
 
     def __getitem__(self, index):
-        
-        src_line = self.src_lines[index].strip().split('\t')
-        source_id = self.dictionary.encode_line(src_line[:2])
-        target_id = self.dictionary.encode_line(src_line[2:])
+        row = self.data.iloc[index]
+        question = str(row["Question"])
+        answer = str(row["Answer-Entity"])
+        encoded_question = self.tokenizer(
+            question,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_q_len,
+            return_tensors='pt'
+        )
+        try:
+            answer_id = self.entity2id[answer]
+        except KeyError:
+            raise ValueError(f"Unknown entity: {answer}")
+        target_id = self.dictionary.encode_line([answer_id])[:-1]
         return {
             "id": index,
-            "source": source_id,
+            "input_ids": encoded_question["input_ids"].squeeze(0),
+            "attention_mask": encoded_question["attention_mask"].squeeze(0),
             "target": target_id,
         }
 
     def collate_fn(self, samples):
         bsz = len(samples)
-        source = torch.LongTensor(bsz, 3)
+        input_ids = torch.stack([sample["input_ids"] for sample in samples])
+        attention_mask = torch.stack([sample["attention_mask"] for sample in samples])
         target = torch.LongTensor(bsz, 1)
-
-        source[:, 0].fill_(self.dictionary.bos())
 
         ids =  []
         for idx, sample in enumerate(samples):
             ids.append(sample["id"])
-            source_ids = sample["source"]
             target_ids = sample["target"]
-            source[idx, 1:] = source_ids[: -1]
-            target[idx, 0] = target_ids[: -1]
+            input_ids[idx] = sample["input_ids"]
+            attention_mask[idx] = sample["attention_mask"]
+            target[idx, 0] = target_ids[0]
         
         return {
             "ids": torch.LongTensor(ids).to(self.device),
-            "source": source.to(self.device),
+            "input_ids": input_ids.to(self.device),
+            "attention_mask": attention_mask.to(self.device),
             "target": target.to(self.device)
         }

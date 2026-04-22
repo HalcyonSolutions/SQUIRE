@@ -1,4 +1,4 @@
-from dataset import Seq2SeqDataset
+from dataset import Seq2SeqDataset, TestDataset
 import random
 import ast
 import numpy as np
@@ -10,10 +10,10 @@ class Args:
     smart_filter = False
     max_q_len = 32
     question_file = "kinship_hinton_qa_nhop.csv"
-    verbose = False
+    verbose = True
 
 
-def test_dataset_sample():
+def test_seq2seq_dataset():
     args = Args()
 
     def vprint(*print_args, **print_kwargs):
@@ -24,6 +24,7 @@ def test_dataset_sample():
         data_path="data/kinshiphinton_final/",
         vocab_file="data/kinshiphinton_final/vocab.txt",
         device="cpu",
+        split="train",
         args=args
     )
 
@@ -91,9 +92,71 @@ def test_dataset_sample():
             vprint("Original question:", true_question)
             vprint("Decoded question:", decoded)
 
-    print("\nAll tests passed successfully!")
+    print("\nAll Seq2SeqDataset tests passed successfully!")
+    return True
+
+def test_test_dataset():
+    args = Args()
+
+    def vprint(*print_args, **print_kwargs):
+        if args.verbose:
+            print(*print_args, **print_kwargs)
+
+    dataset = TestDataset(
+        data_path="data/kinshiphinton_final/",
+        vocab_file="data/kinshiphinton_final/vocab.txt",
+        device="cpu",
+        split="test",
+        args=args
+    )
+
+    vprint(f"Length of the test dataset: {len(dataset)}")
+    if args.verbose:
+        sample_size = min(3, len(dataset))
+        idx_array = random.sample(range(len(dataset)), sample_size)
+        print(f"Randomly selected indices for testing: {idx_array}")
+    else:
+        idx_array = np.arange(len(dataset))
+        print(f"Testing all samples in the test dataset: {len(idx_array)} samples")
+
+    for idx in idx_array:
+        sample = dataset[idx]
+        row = dataset.data.iloc[idx]
+        true_question = str(row["Question"]).strip().lower()
+
+        assert "input_ids" in sample
+        assert "attention_mask" in sample
+        assert "target" in sample
+
+        assert len(sample["input_ids"]) == args.max_q_len
+        assert len(sample["attention_mask"]) == args.max_q_len
+        assert len(sample["target"]) == 1
+
+        input_ids = sample["input_ids"]
+        attention_mask = sample["attention_mask"]
+        pad_id = dataset.tokenizer.pad_token_id
+        for i in range(len(input_ids)):
+            if input_ids[i].item() == pad_id:
+                assert attention_mask[i].item() == 0
+
+        decoded_target = dataset.dictionary[sample["target"][0].item()]
+        assert decoded_target != "<unk>", "Found <unk> in target"
+
+        decoded_question = dataset.tokenizer.decode(sample["input_ids"], skip_special_tokens=True).strip().lower()
+        assert decoded_question == true_question, f"Decoded question does not match original. Decoded: '{decoded_question}', Original: '{true_question}'"
+
+        if args.verbose:
+            vprint("\n=== TestDataset Sample ===")
+            vprint("Original question:", true_question)
+            vprint("Decoded question:", decoded_question)
+            vprint("Decoded target:", decoded_target)
+
+    print("\nAll TestDataset tests passed successfully!")
     return True
 
 
 if __name__ == "__main__":
-    test_dataset_sample()
+    print("Running Seq2SeqDataset tests...")
+    test_seq2seq_dataset()
+    print("\n\nRunning TestDataset tests...")
+    test_test_dataset()
