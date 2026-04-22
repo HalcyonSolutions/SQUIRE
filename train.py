@@ -51,7 +51,7 @@ def get_args():
     parser.add_argument("--output-path", default=False, action="store_true") # output top correct path in a file (for interpretability evaluation)
     
     # question input related
-    parser.add_argument("--question-file", default="./data/kinshiphinton_final/kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
+    parser.add_argument("--question-file", default="kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
     parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
     args = parser.parse_args()
     return args
@@ -284,10 +284,10 @@ def train(args):
                     )
     logging.info(args)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, args=args)
-    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", args=args)
-    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", args=args)
-    train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", args=args)
+    train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
+    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split="test", args=args) # in kinship there's no valid set
+    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", split="test", args=args)
+    train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", split="train", args=args)
     train_valid, eval_valid = train_set.get_next_valid()
     train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True)
     valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
