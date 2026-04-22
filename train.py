@@ -56,6 +56,9 @@ def get_args():
     args = parser.parse_args()
     return args
 
+def safe_lookup(x, rev_dict=None):
+    return rev_dict[x] if x in rev_dict else str(x)
+
 def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=None):
     model.eval()
     beam_size = args.beam_size
@@ -93,7 +96,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 logits = F.log_softmax(logits, dim=-1)
             else:
                 restricted = torch.ones([batch_size, vocab_size]) * restricted_punish
-                index = tmp_source[:, 1].cpu().numpy()
+                index = tmp_input_ids[:, 1].cpu().numpy()
                 for i in range(batch_size):
                     if index[i] in true_triples:
                         if args.smart_filter:
@@ -122,7 +125,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     restricted = torch.ones([batch_size, beam_size, vocab_size]) * restricted_punish
                     hid = prefix[:, :, l-2]
                     if l == 2:
-                        hid = source[:, :, 1]
+                        hid = input_ids[:, :, 1]
                     rid = prefix[:, :, l-1]
                     if l % 2 == 0:
                         index = vocab_size * rid + hid
@@ -197,8 +200,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     candidates[i][candidate] = max(candidates[i][candidate], prob)
             target = samples["target"].cpu()
             for i in range(batch_size):
-                hid = samples["source"][i][1].item()
-                rid = samples["source"][i][2].item()
+                hid = samples["input_ids"][i][1].item()
+                rid = samples["input_ids"][i][2].item()
                 index = vocab_size * rid + hid
                 if index in valid_triples:
                     mask = valid_triples[index]
@@ -217,7 +220,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 candidate_path = [pair[1][1] for pair in candidate_]
                 candidate = torch.from_numpy(np.array(candidate))
                 ranking = (candidate[:] == target[i]).nonzero()
-                path_token = rev_dict[hid] + " " + rev_dict[rid] + " " + rev_dict[target[i].item()] + '\t'
+
+                # path_token = rev_dict[hid] + " " + rev_dict[rid] + " " + rev_dict[target[i].item()] + '\t'
+                path_token = safe_lookup(hid, rev_dict) + " " + safe_lookup(rid, rev_dict) + " " + safe_lookup(target[i].item(), rev_dict) + '\t'
 
                 if ranking.nelement() != 0:
                     path = candidate_path[ranking]
