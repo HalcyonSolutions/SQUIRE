@@ -282,15 +282,24 @@ class TestDataset(Dataset):
             self.dictionary = Dictionary()
             self._init_vocab()
         self.entity2id = {}
+        self.id2entity = {}
         with open(self.data_path + "entity2id.txt") as f:
             for line in f:
                 e, eid = line.strip().split('\t')
                 self.entity2id[e] = eid
+                self.id2entity[eid] = e
         self.relation2id = {}
+        self.id2relation = {}
+        relation_rows = []
         with open(self.data_path + "relation2id.txt") as f:
             for line in f:
                 r, rid = line.strip().split('\t')
-                self.relation2id[r] = rid
+                relation_rows.append((r, rid))
+        num_relations = len(relation_rows)
+        for r, rid in relation_rows:
+            self.relation2id[r] = rid
+            self.id2relation["R" + rid] = r
+            self.id2relation["R" + str(int(rid) + num_relations)] = f"{r} (reverse)"
         self.padding_idx = self.dictionary.pad()
         self.len_vocab = len(self.dictionary)
 

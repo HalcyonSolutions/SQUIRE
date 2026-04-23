@@ -10,6 +10,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 import logging
+import ast
 import transformers
 from iterative_training import Iter_trainer
 import math
@@ -53,13 +54,152 @@ def get_args():
     # question input related
     parser.add_argument("--question-file", default="kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
     parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
+    parser.add_argument("--eval-preview-count", default=1, type=int, help="number of readable evaluation examples to print per split; set to 0 to disable")
+    parser.add_argument("--eval-preview-topk", default=3, type=int, help="number of top predictions to show inside each evaluation preview")
     args = parser.parse_args()
     return args
 
 def safe_lookup(x, rev_dict=None):
     return rev_dict[x] if x in rev_dict else str(x)
 
-def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=None):
+def parse_optional_literal(value):
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return text
+    return value
+
+def get_row_text(row, key, default="N/A"):
+    if row is None or key not in row:
+        return default
+    value = row[key]
+    if value is None:
+        return default
+    if isinstance(value, float) and math.isnan(value):
+        return default
+    text = str(value).strip()
+    return text if text else default
+
+def decode_symbol(symbol, dataset=None):
+    if dataset is not None:
+        if hasattr(dataset, "id2entity") and symbol in dataset.id2entity:
+            return dataset.id2entity[symbol]
+        if hasattr(dataset, "id2relation") and symbol in dataset.id2relation:
+            return dataset.id2relation[symbol]
+    return symbol
+
+def decode_token(token_id, rev_dict, dataset=None):
+    symbol = safe_lookup(int(token_id), rev_dict)
+    return decode_symbol(symbol, dataset)
+
+def format_query_chain(row, relation_fallback):
+    if row is None:
+        return relation_fallback
+    query_relations = parse_optional_literal(row.get("Query-Relations"))
+    if isinstance(query_relations, list) and query_relations:
+        return " -> ".join(str(relation) for relation in query_relations)
+    return get_row_text(row, "Query-Relation", relation_fallback)
+
+def format_gold_path(row):
+    if row is None:
+        return "N/A"
+    paths = parse_optional_literal(row.get("Paths"))
+    if not isinstance(paths, list) or not paths:
+        return "N/A"
+
+    first_hop = paths[0]
+    if not isinstance(first_hop, (list, tuple)) or len(first_hop) < 3:
+        return "N/A"
+
+    parts = [str(first_hop[0])]
+    for hop in paths:
+        if not isinstance(hop, (list, tuple)) or len(hop) < 3:
+            continue
+        parts.append(f"--{hop[1]}--> {hop[2]}")
+    return " ".join(parts) if len(parts) > 1 else "N/A"
+
+def format_generated_path(head_label, path_tokens, rev_dict, dataset, eos, bos):
+    if path_tokens is None:
+        return "N/A"
+
+    parts = [head_label]
+    pending_relation = None
+
+    for token in path_tokens[1:]:
+        token_id = int(token)
+        if token_id == eos:
+            break
+        if token_id == bos:
+            continue
+
+        symbol = safe_lookup(token_id, rev_dict)
+        label = decode_symbol(symbol, dataset)
+        if symbol.startswith("R"):
+            pending_relation = label
+            continue
+        if pending_relation is None:
+            continue
+
+        if pending_relation.endswith(" (reverse)"):
+            relation_name = pending_relation[: -len(" (reverse)")]
+            parts.append(f"<-{relation_name}- {label}")
+        else:
+            parts.append(f"--{pending_relation}--> {label}")
+        pending_relation = None
+
+    if pending_relation is not None:
+        parts.append(f"--{pending_relation}--> ?")
+
+    return " ".join(parts)
+
+def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos):
+    row = None
+    if dataset is not None and hasattr(dataset, "data"):
+        row = dataset.data.iloc[int(sample_id)]
+
+    source_entity = get_row_text(row, "Source-Entity", decode_token(head_id, rev_dict, dataset))
+    relation_chain = format_query_chain(row, decode_token(relation_id, rev_dict, dataset))
+    gold_answer = get_row_text(row, "Answer-Entity", decode_token(target_id, rev_dict, dataset))
+    predicted_answer = decode_token(candidate_ids[0], rev_dict, dataset) if candidate_ids else "N/A"
+    predicted_path = "N/A"
+    if candidate_paths:
+        predicted_path = format_generated_path(source_entity, candidate_paths[0], rev_dict, dataset, eos, bos)
+
+    top_predictions = [decode_token(candidate_id, rev_dict, dataset) for candidate_id in candidate_ids[:preview_topk]]
+    rank_text = str(rank_idx + 1) if rank_idx is not None else "not ranked"
+    status = "correct" if candidate_ids and candidate_ids[0] == target_id else "incorrect"
+
+    lines = [
+        f"Question: {get_row_text(row, 'Question')}",
+        f"Structured Input: source={source_entity} | relation chain={relation_chain}",
+        f"Gold Answer: {gold_answer}",
+        f"Predicted Answer: {predicted_answer} ({status}; gold rank={rank_text})",
+    ]
+    if predicted_path != "N/A":
+        lines.append(f"Predicted Path: {predicted_path}")
+
+    gold_path = format_gold_path(row)
+    if gold_path != "N/A":
+        lines.append(f"Gold Path: {gold_path}")
+
+    if top_predictions:
+        lines.append(f"Top-{len(top_predictions)} Predictions: " + " | ".join(top_predictions))
+
+    return "\n".join(lines)
+
+def write_tqdm_block(block):
+    for line in block.splitlines():
+        tqdm.write(line)
+
+def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=None, split_name="eval"):
     model.eval()
     beam_size = args.beam_size
     l_punish = args.l_punish
@@ -71,12 +211,20 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     bos = model.dictionary.bos()
     rev_dict = dict()
     lines = []
+    dataset = getattr(dataloader, "dataset", None)
+    preview_blocks = []
+    preview_limit = max(0, getattr(args, "eval_preview_count", 0))
+    preview_topk = max(1, getattr(args, "eval_preview_topk", 1))
+    split_label = split_name.title()
     for k in model.dictionary.indices.keys():
         v = model.dictionary.indices[k]
         rev_dict[v] = k
-    with tqdm(dataloader, desc="testing") as pbar:
+    with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
-            pbar.set_description("MRR: %f, Hit@1: %f, Hit@3: %f, Hit@10: %f" % (mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count)))
+            pbar.set_description(
+                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@10: %f"
+                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count))
+            )
             batch_size = samples["input_ids"].size(0)
             candidates = [dict() for i in range(batch_size)]
             candidates_path = [dict() for i in range(batch_size)]
@@ -217,38 +365,77 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                 candidates[i][tid] -= 100000
                 count += 1
                 candidate_ = sorted(zip(candidates[i].items(), candidates_path[i].items()), key=lambda x:x[0][1], reverse=True)
-                candidate = [pair[0][0] for pair in candidate_]
+                candidate_ids = [pair[0][0] for pair in candidate_]
                 candidate_path = [pair[1][1] for pair in candidate_]
-                candidate = torch.from_numpy(np.array(candidate))
-                ranking = (candidate[:] == target[i]).nonzero()
+                if candidate_ids:
+                    candidate = torch.as_tensor(candidate_ids, dtype=torch.long)
+                else:
+                    candidate = torch.empty(0, dtype=torch.long)
+                target_id = target[i].item()
+                ranking = (candidate[:] == target_id).nonzero(as_tuple=False)
+                rank_idx = None
 
                 # path_token = rev_dict[hid] + " " + rev_dict[rid] + " " + rev_dict[target[i].item()] + '\t'
-                path_token = safe_lookup(hid, rev_dict) + " " + safe_lookup(rid, rev_dict) + " " + safe_lookup(target[i].item(), rev_dict) + '\t'
+                path_token = safe_lookup(hid, rev_dict) + " " + safe_lookup(rid, rev_dict) + " " + safe_lookup(target_id, rev_dict) + '\t'
 
                 if ranking.nelement() != 0:
-                    path = candidate_path[ranking]
+                    rank_idx = ranking[0].item()
+                    path = candidate_path[rank_idx]
                     for token in path[1:-1]:
                         path_token += (rev_dict[token]+' ')
                     path_token += (rev_dict[path[-1]]+'\t')
-                    path_token += str(ranking.item())
-                    ranking = 1 + ranking.item()
-                    mrr += (1 / ranking)
+                    path_token += str(rank_idx)
+                    ranking_value = 1 + rank_idx
+                    mrr += (1 / ranking_value)
                     hit += 1
-                    if ranking <= 1:
+                    if ranking_value <= 1:
                         hit1 += 1
-                    if ranking <= 3:
+                    if ranking_value <= 3:
                         hit3 += 1
-                    if ranking <= 10:
+                    if ranking_value <= 10:
                         hit10 += 1
                 else:
                     path_token += "wrong"
                 lines.append(path_token+'\n')
+
+                if len(preview_blocks) < preview_limit:
+                    preview_blocks.append(
+                        build_eval_preview(
+                            dataset=dataset,
+                            sample_id=samples["ids"][i].item(),
+                            head_id=hid,
+                            relation_id=rid,
+                            target_id=target_id,
+                            candidate_ids=candidate_ids,
+                            candidate_paths=candidate_path,
+                            preview_topk=preview_topk,
+                            rank_idx=rank_idx,
+                            rev_dict=rev_dict,
+                            eos=eos,
+                            bos=bos,
+                        )
+                    )
     
     if args.output_path:
         with open("test_output_squire.txt", "w") as f:
             f.writelines(lines)
-    logging.info("[MRR: %f] [Hit@1: %f] [Hit@3: %f] [Hit@10: %f]" % (mrr/count, hit1/count, hit3/count, hit10/count))
-    return mrr/count, hit1/count, hit3/count, hit10/count
+    metric_denominator = max(1, count)
+    if preview_blocks:
+        for idx, block in enumerate(preview_blocks, start=1):
+            write_tqdm_block(f"[{split_name.upper()} Example {idx}]")
+            write_tqdm_block(block)
+            if idx != len(preview_blocks):
+                tqdm.write("")
+    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@10: %.6f" % (
+        split_name.upper(),
+        mrr/metric_denominator,
+        hit1/metric_denominator,
+        hit3/metric_denominator,
+        hit10/metric_denominator,
+    )
+    tqdm.write(summary)
+    logging.info(summary)
+    return mrr/metric_denominator, hit1/metric_denominator, hit3/metric_denominator, hit10/metric_denominator
 
 
 def plot_epoch_metrics(metric_history, save_dir):
@@ -376,8 +563,8 @@ def train(args):
                 % (epoch + 1, args.num_epoch, np.mean(losses))
                 )
         with torch.no_grad():
-            train_mrr, train_hit1, train_hit3, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid)
-            valid_mrr, valid_hit1, valid_hit3, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid)
+            train_mrr, train_hit1, train_hit3, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
+            valid_mrr, valid_hit1, valid_hit3, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
 
         metric_history["epoch"].append(epoch + 1)
         metric_history["train_mrr"].append(train_mrr)
@@ -417,7 +604,8 @@ def train(args):
                 best_hit1,
             )
 
-    plot_epoch_metrics(metric_history, save_path)
+        if epoch % 5 == 0:
+            plot_epoch_metrics(metric_history, save_path)
 
 def checkpoint(args):
     args.dataset = os.path.join('data', args.dataset)
@@ -442,7 +630,7 @@ def checkpoint(args):
     model.args = args
     model = model.to(device)
     with torch.no_grad():
-        evaluate(model, test_loader, device, args, train_valid, eval_valid)
+        evaluate(model, test_loader, device, args, train_valid, eval_valid, split_name="test")
     
 
 if __name__ == "__main__":
