@@ -50,6 +50,8 @@ def get_args():
     parser.add_argument("--warmup", default=3, type=float) # warmup steps ratio
     parser.add_argument("--self-consistency", default=False, action="store_true") # self-consistency
     parser.add_argument("--output-path", default=False, action="store_true") # output top correct path in a file (for interpretability evaluation)
+    parser.add_argument("--validate-during-training", dest="validate_during_training", action="store_true", help="run train/valid evaluation during training")
+    parser.add_argument("--validate-interval", default=5, type=int, help="run train/valid evaluation every N epochs when validation is enabled")
     
     # question input related
     parser.add_argument("--question-file", default="kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
@@ -661,51 +663,60 @@ def train(args):
                 "[Epoch %d/%d] [train loss: %f] [token acc: %f] [last acc: %f]"
                 % (epoch + 1, args.num_epoch, np.mean(losses), np.mean(token_accs), np.mean(last_accs))
                 )
-        with torch.no_grad():
-            train_mrr, train_hit1, train_hit3, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
-            valid_mrr, valid_hit1, valid_hit3, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
+        validate_interval = max(1, args.validate_interval)
+        should_validate = args.validate_during_training and ((epoch + 1) % validate_interval == 0)
+        if should_validate:
+            with torch.no_grad():
+                train_mrr, train_hit1, train_hit3, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
+                valid_mrr, valid_hit1, valid_hit3, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
 
+            metric_history["epoch"].append(epoch + 1)
+            metric_history["train_mrr"].append(train_mrr)
+            metric_history["valid_mrr"].append(valid_mrr)
+            metric_history["train_hit1"].append(train_hit1)
+            metric_history["valid_hit1"].append(valid_hit1)
+            metric_history["train_hit3"].append(train_hit3)
+            metric_history["valid_hit3"].append(valid_hit3)
+            metric_history["train_hit10"].append(train_hit10)
+            metric_history["valid_hit10"].append(valid_hit10)
 
-        metric_history["epoch"].append(epoch + 1)
-        metric_history["train_mrr"].append(train_mrr)
-        metric_history["valid_mrr"].append(valid_mrr)
-        metric_history["train_hit1"].append(train_hit1)
-        metric_history["valid_hit1"].append(valid_hit1)
-        metric_history["train_hit3"].append(train_hit3)
-        metric_history["valid_hit3"].append(valid_hit3)
-        metric_history["train_hit10"].append(train_hit10)
-        metric_history["valid_hit10"].append(valid_hit10)
-
-        logging.info(
-            "[Epoch %d Metrics] [Train MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f] "
-            "[Valid MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f]",
-            epoch + 1,
-            train_mrr,
-            train_hit1,
-            train_hit3,
-            train_hit10,
-            valid_mrr,
-            valid_hit1,
-            valid_hit3,
-            valid_hit10,
-        )
-
-        if valid_hit1 > best_hit1:
-            best_hit1 = valid_hit1
-            best_epoch = epoch + 1
-            torch.save(model.state_dict(), ckpt_path + "/best_model.pt".format(best_epoch))
-            logging.info("[Checkpoint Saved] [Epoch: %d] [Best Hit@1: %f]", best_epoch, best_hit1)
-        else:
             logging.info(
-                "[Checkpoint Skipped] [Epoch: %d] [Hit@1: %f] [Best Epoch: %d] [Best Hit@1: %f]",
+                "[Epoch %d Metrics] [Train MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f] "
+                "[Valid MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f]",
                 epoch + 1,
+                train_mrr,
+                train_hit1,
+                train_hit3,
+                train_hit10,
+                valid_mrr,
                 valid_hit1,
-                best_epoch,
-                best_hit1,
+                valid_hit3,
+                valid_hit10,
             )
 
-        if epoch % 5 == 0:
+            if valid_hit1 > best_hit1:
+                best_hit1 = valid_hit1
+                best_epoch = epoch + 1
+                torch.save(model.state_dict(), ckpt_path + "/best_model.pt".format(best_epoch))
+                logging.info("[Checkpoint Saved] [Epoch: %d] [Best Hit@1: %f]", best_epoch, best_hit1)
+            else:
+                logging.info(
+                    "[Checkpoint Skipped] [Epoch: %d] [Hit@1: %f] [Best Epoch: %d] [Best Hit@1: %f]",
+                    epoch + 1,
+                    valid_hit1,
+                    best_epoch,
+                    best_hit1,
+                )
+
             plot_epoch_metrics(metric_history, save_path)
+        else:
+            logging.info(
+                "[Epoch %d/%d] train/valid evaluation skipped. validate_during_training=%s validate_interval=%d",
+                epoch + 1,
+                args.num_epoch,
+                args.validate_during_training,
+                validate_interval,
+            )
 
 def checkpoint(args):
     args.dataset = os.path.join('data', args.dataset)
