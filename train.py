@@ -431,6 +431,11 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                 else:                             
                                     candidates[i][candidate] = max(candidates[i][candidate], prob)
             target = samples["target"].cpu()
+            if count < 5:
+                print("\n[BEFORE FILTER]")
+                print("Gold:", target[i].item())
+                for k, v in list(candidates[i].items())[:10]:
+                    print(k, v)
             for i in range(batch_size):
                 hid = samples["head_id"][i].item()
                 rid = samples["relation_id"][i].item()
@@ -488,6 +493,12 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     path_token += "wrong"
                 lines.append(path_token+'\n')
 
+                if count < 5:
+                    print("\n[RANK DEBUG]")
+                    print("Gold:", target_id)
+                    print("Final ranked (top10):", candidate_ids[:10])
+                    print("Final rank:", rank_idx)
+
                 if len(preview_blocks) < preview_limit:
                     preview_blocks.append(
                         build_eval_preview(
@@ -505,6 +516,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                             bos=bos,
                         )
                     )
+            if count < 5:
+                print("\n[AFTER FILTER]")
+                for k, v in list(candidates[i].items())[:10]:
+                    print(k, v)
     
     if args.output_path:
         with open("test_output_squire.txt", "w") as f:
