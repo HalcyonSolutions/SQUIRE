@@ -282,32 +282,32 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             )
             batch_size = samples["input_ids"].size(0)
 
-            if count < 5:
-                debug_prefix = torch.zeros([batch_size, 3], dtype=torch.long).to(device)
-                debug_prefix[:, 0] = model.dictionary.bos()
-                debug_prefix[:, 1] = samples["head_id"]
-                debug_prefix[:, 2] = samples["relation_id"]
+            # if count < 5:
+            #     debug_prefix = torch.zeros([batch_size, 3], dtype=torch.long).to(device)
+            #     debug_prefix[:, 0] = model.dictionary.bos()
+            #     debug_prefix[:, 1] = samples["head_id"]
+            #     debug_prefix[:, 2] = samples["relation_id"]
 
-                debug_logits = model.logits(
-                    samples["input_ids"],
-                    samples["attention_mask"],
-                    debug_prefix
-                )[:, -1, :]  # last position predicts entity
+            #     debug_logits = model.logits(
+            #         samples["input_ids"],
+            #         samples["attention_mask"],
+            #         debug_prefix
+            #     )[:, -1, :]  # last position predicts entity
 
-                probs = F.softmax(debug_logits, dim=-1)
-                topk = torch.topk(probs, k=10, dim=-1)
+            #     probs = F.softmax(debug_logits, dim=-1)
+            #     topk = torch.topk(probs, k=10, dim=-1)
 
-                for i in range(min(3, batch_size)):
-                    gold = samples["target"][i].item()
+            #     for i in range(min(3, batch_size)):
+            #         gold = samples["target"][i].item()
 
-                    sorted_ids = torch.argsort(probs[i], descending=True)
-                    rank = (sorted_ids == gold).nonzero(as_tuple=False)
-                    rank = rank.item() if rank.numel() > 0 else None
+            #         sorted_ids = torch.argsort(probs[i], descending=True)
+            #         rank = (sorted_ids == gold).nonzero(as_tuple=False)
+            #         rank = rank.item() if rank.numel() > 0 else None
 
-                    print("\n[LOGITS ENTITY DEBUG]")
-                    print("Gold:", gold)
-                    print("Top-10:", topk.indices[i].tolist())
-                    print("Gold rank:", rank)
+            #         print("\n[LOGITS ENTITY DEBUG]")
+            #         print("Gold:", gold)
+            #         print("Top-10:", topk.indices[i].tolist())
+            #         print("Gold rank:", rank)
 
             candidates = [dict() for i in range(batch_size)]
             candidates_path = [dict() for i in range(batch_size)]
@@ -449,6 +449,13 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 count += 1
                 candidate_ = sorted(zip(candidates[i].items(), candidates_path[i].items()), key=lambda x:x[0][1], reverse=True)
                 candidate_ids = [pair[0][0] for pair in candidate_]
+                if count < 5:
+                    gold = target[i].item()
+
+                    print("\n[BEAM DEBUG]")
+                    print("Gold:", gold)
+                    print("Top candidates:", candidate_ids[:10])
+                    print("Gold in candidates:", gold in candidate_ids)
                 candidate_path = [pair[1][1] for pair in candidate_]
                 if candidate_ids:
                     candidate = torch.as_tensor(candidate_ids, dtype=torch.long)
