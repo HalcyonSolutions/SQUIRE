@@ -96,7 +96,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 logits = F.log_softmax(logits, dim=-1)
             else:
                 restricted = torch.ones([batch_size, vocab_size]) * restricted_punish
-                index = tmp_input_ids[:, 1].cpu().numpy()
+                # index = tmp_input_ids[:, 1].cpu().numpy()
+                index = samples["head_id"].cpu().numpy()
                 for i in range(batch_size):
                     if index[i] in true_triples:
                         if args.smart_filter:
@@ -125,7 +126,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     restricted = torch.ones([batch_size, beam_size, vocab_size]) * restricted_punish
                     hid = prefix[:, :, l-2]
                     if l == 2:
-                        hid = input_ids[:, :, 1]
+                        hid = samples["head_id"].unsqueeze(1).repeat(1, beam_size)
                     rid = prefix[:, :, l-1]
                     if l % 2 == 0:
                         index = vocab_size * rid + hid
@@ -200,8 +201,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     candidates[i][candidate] = max(candidates[i][candidate], prob)
             target = samples["target"].cpu()
             for i in range(batch_size):
-                hid = samples["input_ids"][i][1].item()
-                rid = samples["input_ids"][i][2].item()
+                hid = samples["head_id"][i].item()
+                rid = samples["relation_id"][i].item()
                 index = vocab_size * rid + hid
                 if index in valid_triples:
                     mask = valid_triples[index]
