@@ -56,6 +56,9 @@ def get_args():
     parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
     parser.add_argument("--eval-preview-count", default=1, type=int, help="number of readable evaluation examples to print per split; set to 0 to disable")
     parser.add_argument("--eval-preview-topk", default=3, type=int, help="number of top predictions to show inside each evaluation preview")
+    parser.add_argument("--train-preview-count", default=0, type=int, help="number of readable training examples to print per preview; set to 0 to disable")
+    parser.add_argument("--train-preview-interval", default=100, type=int, help="print readable training preview every N optimizer steps when enabled")
+    parser.add_argument("--train-preview-topk", default=5, type=int, help="number of top tokens to show for each previewed final answer position")
     args = parser.parse_args()
     return args
 
@@ -192,6 +195,56 @@ def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, cand
 
     if top_predictions:
         lines.append(f"Top-{len(top_predictions)} Predictions: " + " | ".join(top_predictions))
+
+    return "\n".join(lines)
+
+def build_rev_dict(dictionary):
+    return {v: k for k, v in dictionary.indices.items()}
+
+def format_token_sequence(token_ids, rev_dict, dataset, length=None):
+    if length is not None:
+        token_ids = token_ids[:length]
+    return " | ".join(decode_token(token_id, rev_dict, dataset) for token_id in token_ids.detach().cpu().tolist())
+
+def format_top_tokens(logit_row, rev_dict, dataset, topk):
+    topk = min(topk, logit_row.size(-1))
+    probs = F.softmax(logit_row, dim=-1)
+    top_probs, top_ids = torch.topk(probs, k=topk)
+    pieces = []
+    for token_id, prob in zip(top_ids.detach().cpu().tolist(), top_probs.detach().cpu().tolist()):
+        pieces.append(f"{decode_token(token_id, rev_dict, dataset)} ({prob:.4f})")
+    return " | ".join(pieces)
+
+def build_train_preview(samples, pred, logits, last_idx, dataset, rev_dict, args, step):
+    preview_count = min(max(0, args.train_preview_count), pred.size(0))
+    preview_topk = max(1, args.train_preview_topk)
+    lines = [f"[Train Preview | step {step}]"]
+
+    for i in range(preview_count):
+        sample_id = int(samples["ids"][i].detach().cpu().item())
+        row = dataset.data.iloc[sample_id] if dataset is not None and hasattr(dataset, "data") else None
+        question = get_row_text(row, "Question", "N/A")
+        input_len = int(samples["attention_mask"][i].sum().detach().cpu().item())
+        input_ids = samples["input_ids"][i, :input_len].detach().cpu().tolist()
+        input_text = dataset.tokenizer.decode(input_ids, skip_special_tokens=True) if dataset is not None and hasattr(dataset, "tokenizer") else str(input_ids)
+        length = int(samples["lengths"][i].detach().cpu().item()) if "lengths" in samples else int(samples["mask"][i].sum().detach().cpu().item())
+        final_pos = int(last_idx[i].detach().cpu().item())
+
+        lines.extend([
+            f"Example {i + 1} (dataset id: {sample_id})",
+            f"Question: {question}",
+            f"Model input text: {input_text}",
+            f"input_ids: {input_ids}",
+            f"attention_mask length: {input_len}",
+            f"prev_outputs (teacher forcing): {format_token_sequence(samples['prev_outputs'][i], rev_dict, dataset, length)}",
+            f"target tokens: {format_token_sequence(samples['target'][i], rev_dict, dataset, length)}",
+            f"predicted tokens: {format_token_sequence(pred[i], rev_dict, dataset, length)}",
+            f"mask: {samples['mask'][i, :length].detach().cpu().tolist()}",
+            f"last_idx: {final_pos}",
+            f"target_last: {decode_token(samples['target'][i, final_pos].detach().cpu().item(), rev_dict, dataset)}",
+            f"pred_last: {decode_token(pred[i, final_pos].detach().cpu().item(), rev_dict, dataset)}",
+            f"last-token top-{preview_topk}: {format_top_tokens(logits[i, final_pos], rev_dict, dataset, preview_topk)}",
+        ])
 
     return "\n".join(lines)
 
@@ -488,6 +541,7 @@ def train(args):
     train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False)
     
     model = TransformerModel(args, train_set.dictionary).to(device)
+    train_preview_rev_dict = build_rev_dict(train_set.dictionary)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     steps = len(train_loader)
     total_step_num = len(train_loader) * args.num_epoch
@@ -549,7 +603,9 @@ def train(args):
         model.train()
         with tqdm(train_loader, desc="training") as pbar:
             losses = []
-            for samples in pbar:
+            token_accs = []
+            last_accs = []
+            for batch_idx, samples in enumerate(pbar):
                 optimizer.zero_grad()
                 loss = model.get_loss(**samples)
                 loss.backward()
@@ -557,14 +613,58 @@ def train(args):
                 scheduler.step()
                 steps += 1
                 losses.append(loss.item())
-                pbar.set_description("Epoch: %d, Loss: %0.8f, lr: %0.6f" % (epoch + 1, np.mean(losses), optimizer.param_groups[0]['lr']))
+
+                with torch.no_grad():
+                    logits = model.logits(
+                        samples["input_ids"],
+                        samples["attention_mask"],
+                        samples["prev_outputs"]
+                    )
+
+                    pred = logits.argmax(dim=-1)
+
+                    target = samples["target"]
+                    mask = samples["mask"]
+
+                    correct = (pred == target) & mask.bool()
+                    token_acc = correct.sum().float() / mask.sum().float()
+
+                    lengths = mask.sum(dim=1).long()
+                    last_idx = lengths - 2
+                    batch_indices = torch.arange(pred.size(0), device=pred.device)
+
+                    pred_last = pred[batch_indices, last_idx]
+                    target_last = target[batch_indices, last_idx]
+
+                    last_acc = (pred_last == target_last).float().mean()
+
+                    if args.train_preview_count > 0 and (batch_idx == 0 or steps % max(1, args.train_preview_interval) == 0):
+                        preview_block = build_train_preview(
+                            samples,
+                            pred,
+                            logits,
+                            last_idx,
+                            train_set,
+                            train_preview_rev_dict,
+                            args,
+                            steps
+                        )
+                        write_tqdm_block(preview_block)
+                        logging.info("\n%s", preview_block)
+
+                token_accs.append(token_acc.item())
+                last_accs.append(last_acc.item())
+                pbar.set_description(
+                    f"Epoch: {epoch+1}, Loss: {np.mean(losses):.4f}, TokenAcc: {token_acc:.4f}, LastAcc: {last_acc:.4f}, lr: {optimizer.param_groups[0]['lr']:.6f}"
+                )
         logging.info(
-                "[Epoch %d/%d] [train loss: %f]"
-                % (epoch + 1, args.num_epoch, np.mean(losses))
+                "[Epoch %d/%d] [train loss: %f] [token acc: %f] [last acc: %f]"
+                % (epoch + 1, args.num_epoch, np.mean(losses), np.mean(token_accs), np.mean(last_accs))
                 )
         with torch.no_grad():
             train_mrr, train_hit1, train_hit3, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
             valid_mrr, valid_hit1, valid_hit3, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
+
 
         metric_history["epoch"].append(epoch + 1)
         metric_history["train_mrr"].append(train_mrr)
