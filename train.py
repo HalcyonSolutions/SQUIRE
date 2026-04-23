@@ -614,8 +614,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         f"Top-1: {debug_token(top1) if top1 is not None else None}",
                         "========================================",
                     ])
-                    if args.validate_during_training:
-                        write_tqdm_block("\n".join(debug_blocks[i]))
+                    # uncommend this line if you want to see the debug blocks 
+                    # for the first 2 samples (will print a lot of info about model input and logits)
+                    # write_tqdm_block("\n".join(debug_blocks[i]))
 
                 if len(preview_blocks) < preview_limit:
                     preview_blocks.append(

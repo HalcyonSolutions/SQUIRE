@@ -127,7 +127,7 @@ class Seq2SeqDataset(Dataset):
         l = len(target_id)
         mask = torch.ones_like(target_id)
         for i in range(0, l-2):
-            if i % 2 == 0: # do not mask relation
+            if i % 2 == 0:
                 continue
             if random.random() < self.args.prob: # randomly replace with prob
                 target_id[i] = random.randint(0, self.len_vocab - 1)
