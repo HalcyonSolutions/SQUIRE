@@ -580,15 +580,15 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 ranking = (candidate[:] == target_id).nonzero(as_tuple=False)
                 rank_idx = None
 
-                # path_token = rev_dict[hid] + " " + rev_dict[rid] + " " + rev_dict[target[i].item()] + '\t'
-                path_token = safe_lookup(hid, rev_dict) + " " + safe_lookup(rid, rev_dict) + " " + safe_lookup(target_id, rev_dict) + '\t'
+                head_label = decode_token(hid, rev_dict, dataset)
+                relation_label = decode_token(rid, rev_dict, dataset)
+                target_label = decode_token(target_id, rev_dict, dataset)
+                path_token = f"{head_label} | {relation_label} | {target_label}\t"
 
                 if ranking.nelement() != 0:
                     rank_idx = ranking[0].item()
                     path = candidate_path[rank_idx]
-                    for token in path[1:-1]:
-                        path_token += (rev_dict[token]+' ')
-                    path_token += (rev_dict[path[-1]]+'\t')
+                    path_token += format_generated_path(head_label, path, rev_dict, dataset, eos, bos) + '\t'
                     path_token += str(rank_idx)
                     ranking_value = 1 + rank_idx
                     mrr += (1 / ranking_value)
