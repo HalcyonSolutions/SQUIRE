@@ -116,7 +116,11 @@ class TransformerModel(nn.Module):
         self.bert.eval()
         for param in self.bert.parameters():
             param.requires_grad = False
-        self.bert_proj = nn.Linear(768, args.embedding_dim)
+        self.bert_proj = nn.Sequential(
+            nn.Linear(768, 512),
+            nn.ReLU(),
+            nn.Linear(512, args.embedding_dim)
+        )
         self.fc = torch.nn.Linear(self.ninp, self.ninp)
         self.dictionary = dictionary
         self.glue = GELU()
