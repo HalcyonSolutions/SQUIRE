@@ -275,6 +275,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         v = model.dictionary.indices[k]
         rev_dict[v] = k
 
+    # I'm aware that nested function making Code Smell
+    # For now they will stay here,
+    # they help with debugging.
+    # After I'm finished, I remove them.
     def debug_token(token_id):
         token_id = int(token_id)
         return f"{token_id} ({decode_token(token_id, rev_dict, dataset)})"
@@ -579,11 +583,13 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 target_id = target[i].item()
                 ranking = (candidate[:] == target_id).nonzero(as_tuple=False)
                 rank_idx = None
+                row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
+                question_text = get_row_text(row, "Question")
 
                 head_label = decode_token(hid, rev_dict, dataset)
                 relation_label = decode_token(rid, rev_dict, dataset)
                 target_label = decode_token(target_id, rev_dict, dataset)
-                path_token = f"{head_label} | {relation_label} | {target_label}\t"
+                path_token = f"{question_text}\t{head_label} | {relation_label} | {target_label}\t"
 
                 if ranking.nelement() != 0:
                     rank_idx = ranking[0].item()
@@ -636,7 +642,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         )
                     )
     
-    if args.output_path:
+    if args.output_path and split_name=="valid":
         with open("test_output_squire.txt", "w") as f:
             f.writelines(lines)
     metric_denominator = max(1, count)
