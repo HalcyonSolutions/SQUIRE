@@ -307,6 +307,28 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 return get_row_text(dataset.data.iloc[sample_id], "Question")
         return "N/A"
 
+    def debug_model_input_lines(input_ids_row, attention_mask_row, prefix_row):
+        input_ids_list = input_ids_row.detach().cpu().tolist()
+        attention_mask_list = attention_mask_row.detach().cpu().tolist()
+        prefix_list = prefix_row.detach().cpu().tolist()
+        active_len = int(attention_mask_row.detach().cpu().sum().item())
+        active_input_ids = input_ids_list[:active_len]
+        if dataset is not None and hasattr(dataset, "tokenizer"):
+            input_text = dataset.tokenizer.decode(active_input_ids, skip_special_tokens=True)
+            input_tokens = dataset.tokenizer.convert_ids_to_tokens(active_input_ids)
+        else:
+            input_text = str(active_input_ids)
+            input_tokens = active_input_ids
+        return [
+            "[Model Input]",
+            f"input_ids: {input_ids_list}",
+            f"attention_mask: {attention_mask_list}",
+            f"input interpretation: {input_text}",
+            f"input tokens: {input_tokens}",
+            f"prefix ids: {prefix_list}",
+            f"prefix interpretation: {debug_path(prefix_list)}",
+        ]
+
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
             pbar.set_description(
@@ -373,6 +395,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             tmp_attention_mask = samples["attention_mask"]
             tmp_prefix = torch.zeros([batch_size, 1], dtype=torch.long).to(device)
             tmp_prefix[:, 0].fill_(model.dictionary.bos())
+            if count < 3:
+                for i in range(debug_limit):
+                    debug_blocks[i].extend(debug_model_input_lines(tmp_input_ids[i], tmp_attention_mask[i], tmp_prefix[i]))
             logits = model.logits(tmp_input_ids, tmp_attention_mask, tmp_prefix).squeeze()
             if args.no_filter_gen:
                 logits = F.log_softmax(logits, dim=-1)
@@ -406,6 +431,12 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 tmp_lprob = lprob.unsqueeze(dim=-1).repeat(1, 1, beam_size)    
                 tmp_clen = clen.unsqueeze(dim=-1).repeat(1, 1, beam_size)
                 bb = batch_size * beam_size
+                if l <= 3 and count < 3:
+                    for i in range(debug_limit):
+                        debug_blocks[i].append("[Model Input]")
+                        for j in range(min(3, beam_size)):
+                            debug_blocks[i].append(f"beam {j}:")
+                            debug_blocks[i].extend(debug_model_input_lines(input_ids[i][j], attention_mask[i][j], prefix[i][j]))
                 all_logits = model.logits(input_ids.view(bb, -1), attention_mask.view(bb, -1), prefix.view(bb, -1)).view(batch_size, beam_size, max_len, -1)
                 logits = torch.gather(input=all_logits, dim=2, index=clen.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 1, vocab_size)).squeeze(2)
                 # restrict to true_triples, compute index for true_triples
