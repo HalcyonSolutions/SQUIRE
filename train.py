@@ -258,7 +258,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     model.eval()
     beam_size = args.beam_size
     l_punish = args.l_punish
-    max_len = 2 * args.max_len + 1
+    max_len = 2 * args.max_len + 2
     restricted_punish = -30
     mrr, hit, hit1, hit3, hit10, count = (0, 0, 0, 0, 0, 0)
     vocab_size = len(model.dictionary)
@@ -329,6 +329,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             f"prefix interpretation: {debug_path(prefix_list)}",
         ]
 
+    def slot_role(prefix_idx):
+        return "HEAD/ENTITY" if prefix_idx % 2 == 1 else "RELATION/EOS"
+
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
             pbar.set_description(
@@ -338,8 +341,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             batch_size = samples["input_ids"].size(0)
             debug_limit = 0
             debug_blocks = []
-            if count < 3:
-                debug_limit = min(batch_size, 3 - count)
+            if count < 2:
+                debug_limit = min(batch_size, 2 - count)
                 for i in range(debug_limit):
                     sample_id = samples["ids"][i].detach().cpu().tolist() if "ids" in samples else count + i
                     head_id = samples["head_id"][i].detach().cpu().tolist()
@@ -390,48 +393,35 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             prefix[:, :, 0].fill_(model.dictionary.bos())
             lprob = torch.zeros([batch_size, beam_size]).to(device)
             clen = torch.zeros([batch_size, beam_size], dtype=torch.long).to(device)
-            # first token: choose beam_size from only vocab_size, initiate prefix
+            # first token after BOS predicts head_0
             tmp_input_ids = samples["input_ids"]
             tmp_attention_mask = samples["attention_mask"]
             tmp_prefix = torch.zeros([batch_size, 1], dtype=torch.long).to(device)
             tmp_prefix[:, 0].fill_(model.dictionary.bos())
-            if count < 3:
+            if count < 2:
                 for i in range(debug_limit):
                     debug_blocks[i].extend(debug_model_input_lines(tmp_input_ids[i], tmp_attention_mask[i], tmp_prefix[i]))
-            logits = model.logits(tmp_input_ids, tmp_attention_mask, tmp_prefix).squeeze()
-            if args.no_filter_gen:
-                logits = F.log_softmax(logits, dim=-1)
-            else:
-                restricted = torch.ones([batch_size, vocab_size]) * restricted_punish
-                # index = tmp_input_ids[:, 1].cpu().numpy()
-                index = samples["head_id"].cpu().numpy()
-                for i in range(batch_size):
-                    if index[i] in true_triples:
-                        if args.smart_filter:
-                            restricted[i] = true_triples[index[i]]
-                        else:
-                            idx = torch.LongTensor(true_triples[index[i]]).unsqueeze(0)
-                            restricted[i] = -restricted_punish * torch.zeros(1, vocab_size).scatter_(1, idx, 1) + restricted_punish
-                logits = F.log_softmax(logits+restricted.to(device), dim=-1) # batch_size * vocab_size
+            logits = model.logits(tmp_input_ids, tmp_attention_mask, tmp_prefix).squeeze(1)
+            logits = F.log_softmax(logits, dim=-1)
             logits = logits.view(-1, vocab_size)
             argsort = torch.argsort(logits, dim=-1, descending=True)[:, :beam_size]
             prefix[:, :, 1] = argsort[:, :]
             lprob += torch.gather(input=logits, dim=-1, index=argsort)
             clen += 1
-            # if count < 3:
-            #     debug_logits = logits.view(batch_size, -1)
-            #     for i in range(debug_limit):
-            #         debug_blocks[i].extend([
-            #             "[STEP 0 LOGITS]",
-            #             "Top-10: " + debug_top_values(debug_logits[i], 10, use_softmax=True),
-            #         ])
+            if count < 2:
+                debug_logits = logits.view(batch_size, -1)
+                for i in range(debug_limit):
+                    debug_blocks[i].extend([
+                        "[STEP 0 HEAD/ENTITY LOGITS]",
+                        "Top-10: " + debug_top_values(debug_logits[i], 10),
+                    ])
             target = samples["target"].cpu()
             for l in range(2, max_len):
                 tmp_prefix = prefix.unsqueeze(dim=2).repeat(1, 1, beam_size, 1)
                 tmp_lprob = lprob.unsqueeze(dim=-1).repeat(1, 1, beam_size)    
                 tmp_clen = clen.unsqueeze(dim=-1).repeat(1, 1, beam_size)
                 bb = batch_size * beam_size
-                if l <= 3 and count < 3:
+                if l <= 3 and count < 2:
                     for i in range(debug_limit):
                         debug_blocks[i].append("[Model Input]")
                         for j in range(min(3, beam_size)):
@@ -439,19 +429,17 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                             debug_blocks[i].extend(debug_model_input_lines(input_ids[i][j], attention_mask[i][j], prefix[i][j]))
                 all_logits = model.logits(input_ids.view(bb, -1), attention_mask.view(bb, -1), prefix.view(bb, -1)).view(batch_size, beam_size, max_len, -1)
                 logits = torch.gather(input=all_logits, dim=2, index=clen.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 1, vocab_size)).squeeze(2)
-                # restrict to true_triples, compute index for true_triples
+                # relation slots use the previously predicted head; head slots use (head, relation)
                 if args.no_filter_gen:
                     logits = F.log_softmax(logits, dim=-1)
                 else:
                     restricted = torch.ones([batch_size, beam_size, vocab_size]) * restricted_punish
-                    hid = prefix[:, :, l-2]
-                    if l == 2:
-                        hid = samples["head_id"].unsqueeze(1).repeat(1, beam_size)
-                    rid = prefix[:, :, l-1]
                     if l % 2 == 0:
-                        index = vocab_size * rid + hid
+                        index = prefix[:, :, l - 1]
                     else:
-                        index = rid
+                        hid = prefix[:, :, l - 2]
+                        rid = prefix[:, :, l - 1]
+                        index = vocab_size * rid + hid
                     index = index.cpu().numpy()
                     for i in range(batch_size):
                         for j in range(beam_size):
@@ -462,9 +450,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     idx = torch.LongTensor(true_triples[index[i][j]]).unsqueeze(0)
                                     restricted[i][j] = -restricted_punish * torch.zeros(1, vocab_size).scatter_(1, idx, 1) + restricted_punish
                     logits = F.log_softmax(logits+restricted.to(device), dim=-1)
-                if l <= 3 and count < 3:
+                if l <= 3 and count < 2:
                     for i in range(debug_limit):
-                        debug_blocks[i].append(f"[BEAM STEP {l}]")
+                        debug_blocks[i].append(f"[BEAM STEP {l} | {slot_role(l)}]")
                         debug_blocks[i].append("Current prefixes (first 3 beams):")
                         for j in range(min(3, beam_size)):
                             prefix_tokens = prefix[i][j, :l].detach().cpu().tolist()
@@ -487,14 +475,16 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 # filter out next token after <end>, add to candidates
                 for i in range(batch_size):
                     for j in range(beam_size):
-                        if prefix[i][j][l].item() == eos:
-                            candidate = prefix[i][j][l-1].item()
+                        if l % 2 == 0 and prefix[i][j][l].item() == eos:
+                            candidate_pos = l - 1
+                            candidate = prefix[i][j][candidate_pos].item()
                             if l_punish:
-                                prob = lprob[i][j].item() / int(l / 2)
+                                prob = lprob[i][j].item() / max(1, l // 2)
                             else:
                                 prob = lprob[i][j].item()
-                            if count < 3 and i < debug_limit:
-                                path_tokens = prefix[i][j, :l + 1].detach().cpu().tolist()
+                            path_array = prefix[i][j, :l + 1].detach().cpu().numpy()
+                            if count < 2 and i < debug_limit:
+                                path_tokens = path_array.tolist()
                                 debug_blocks[i].extend([
                                     "[COLLECT CANDIDATE]",
                                     f"Candidate entity: {debug_token(candidate)}",
@@ -507,10 +497,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     candidates[i][candidate] = math.exp(prob)
                                 else:
                                     candidates[i][candidate] = prob
-                                candidates_path[i][candidate] = prefix[i][j].cpu().numpy()
+                                candidates_path[i][candidate] = path_array
                             else:
                                 if prob > candidates[i][candidate]:
-                                    candidates_path[i][candidate] = prefix[i][j].cpu().numpy()
+                                    candidates_path[i][candidate] = path_array
                                 if args.self_consistency:
                                     candidates[i][candidate] += math.exp(prob)
                                 else:
@@ -519,13 +509,15 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 if l == max_len-1:
                     for i in range(batch_size):
                         for j in range(beam_size*2):
-                            candidate = prefix[i][j][l].item()
+                            candidate_pos = l if l % 2 == 1 else l - 1
+                            candidate = prefix[i][j][candidate_pos].item()
                             if l_punish:
-                                prob = lprob[i][j].item() / int(max_len/2)
+                                prob = lprob[i][j].item() / max(1, (l - 1) // 2)
                             else:
                                 prob = lprob[i][j].item()
-                            if count < 3 and i < debug_limit:
-                                path_tokens = prefix[i][j, :l + 1].detach().cpu().tolist()
+                            path_array = prefix[i][j, :candidate_pos + 1].detach().cpu().numpy()
+                            if count < 2 and i < debug_limit:
+                                path_tokens = path_array.tolist()
                                 debug_blocks[i].extend([
                                     "[COLLECT CANDIDATE]",
                                     f"Candidate entity: {debug_token(candidate)}",
@@ -537,17 +529,17 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     candidates[i][candidate] = math.exp(prob)
                                 else:
                                     candidates[i][candidate] = prob
-                                candidates_path[i][candidate] = prefix[i][j].cpu().numpy()
+                                candidates_path[i][candidate] = path_array
                             else:
                                 if prob > candidates[i][candidate]:
-                                    candidates_path[i][candidate] = prefix[i][j].cpu().numpy()
+                                    candidates_path[i][candidate] = path_array
                                 if args.self_consistency:
                                     candidates[i][candidate] += math.exp(prob)
                                 else:                             
                                     candidates[i][candidate] = max(candidates[i][candidate], prob)
             target = samples["target"].cpu()
             for i in range(batch_size):
-                debug_sample = count < 3 and i < debug_limit
+                debug_sample = count < 2 and i < debug_limit
                 hid = samples["head_id"][i].item()
                 rid = samples["relation_id"][i].item()
                 index = vocab_size * rid + hid
@@ -622,7 +614,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         f"Top-1: {debug_token(top1) if top1 is not None else None}",
                         "========================================",
                     ])
-                    write_tqdm_block("\n".join(debug_blocks[i]))
+                    if args.validate_during_training:
+                        write_tqdm_block("\n".join(debug_blocks[i]))
 
                 if len(preview_blocks) < preview_limit:
                     preview_blocks.append(
