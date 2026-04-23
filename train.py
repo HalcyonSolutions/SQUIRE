@@ -274,6 +274,39 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     for k in model.dictionary.indices.keys():
         v = model.dictionary.indices[k]
         rev_dict[v] = k
+
+    def debug_token(token_id):
+        token_id = int(token_id)
+        return f"{token_id} ({decode_token(token_id, rev_dict, dataset)})"
+
+    def debug_path(token_ids):
+        decoded = " | ".join(decode_token(token_id, rev_dict, dataset) for token_id in token_ids)
+        return f"{token_ids} ({decoded})"
+
+    def debug_top_values(value_row, topk, use_softmax=False):
+        values = F.softmax(value_row, dim=-1) if use_softmax else value_row
+        topk = min(topk, values.size(-1))
+        top_values, top_ids = torch.topk(values, k=topk)
+        ids = top_ids.detach().cpu().tolist()
+        scores = top_values.detach().cpu().tolist()
+        return "[" + ", ".join(
+            f"({token_id}, {score:.6f}, {decode_token(token_id, rev_dict, dataset)})"
+            for token_id, score in zip(ids, scores)
+        ) + "]"
+
+    def debug_candidate_lines(candidate_scores, topk=10):
+        items = sorted(candidate_scores.items(), key=lambda item: item[1], reverse=True)[:topk]
+        if not items:
+            return ["[]"]
+        return [f"{debug_token(candidate_id)}: {score:.6f}" for candidate_id, score in items]
+
+    def debug_question(sample_id):
+        if dataset is not None and hasattr(dataset, "data"):
+            sample_id = int(sample_id)
+            if 0 <= sample_id < len(dataset.data):
+                return get_row_text(dataset.data.iloc[sample_id], "Question")
+        return "N/A"
+
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
             pbar.set_description(
@@ -281,6 +314,24 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count))
             )
             batch_size = samples["input_ids"].size(0)
+            debug_limit = 0
+            debug_blocks = []
+            if count < 3:
+                debug_limit = min(batch_size, 3 - count)
+                for i in range(debug_limit):
+                    sample_id = samples["ids"][i].detach().cpu().tolist() if "ids" in samples else count + i
+                    head_id = samples["head_id"][i].detach().cpu().tolist()
+                    relation_id = samples["relation_id"][i].detach().cpu().tolist()
+                    target_id = samples["target"][i].detach().cpu().view(-1)[0].tolist()
+                    debug_blocks.append([
+                        "================ SAMPLE =================",
+                        "[INPUT]",
+                        f"Sample ID: {sample_id}",
+                        f"Question: {debug_question(sample_id)}",
+                        f"Head ID: {debug_token(head_id)}",
+                        f"Relation ID: {debug_token(relation_id)}",
+                        f"Target ID: {debug_token(target_id)}",
+                    ])
 
             # if count < 5:
             #     debug_prefix = torch.zeros([batch_size, 3], dtype=torch.long).to(device)
@@ -342,6 +393,13 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             prefix[:, :, 1] = argsort[:, :]
             lprob += torch.gather(input=logits, dim=-1, index=argsort)
             clen += 1
+            # if count < 3:
+            #     debug_logits = logits.view(batch_size, -1)
+            #     for i in range(debug_limit):
+            #         debug_blocks[i].extend([
+            #             "[STEP 0 LOGITS]",
+            #             "Top-10: " + debug_top_values(debug_logits[i], 10, use_softmax=True),
+            #         ])
             target = samples["target"].cpu()
             for l in range(2, max_len):
                 tmp_prefix = prefix.unsqueeze(dim=2).repeat(1, 1, beam_size, 1)
@@ -373,6 +431,16 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     idx = torch.LongTensor(true_triples[index[i][j]]).unsqueeze(0)
                                     restricted[i][j] = -restricted_punish * torch.zeros(1, vocab_size).scatter_(1, idx, 1) + restricted_punish
                     logits = F.log_softmax(logits+restricted.to(device), dim=-1)
+                if l <= 3 and count < 3:
+                    for i in range(debug_limit):
+                        debug_blocks[i].append(f"[BEAM STEP {l}]")
+                        debug_blocks[i].append("Current prefixes (first 3 beams):")
+                        for j in range(min(3, beam_size)):
+                            prefix_tokens = prefix[i][j, :l].detach().cpu().tolist()
+                            debug_blocks[i].append(f"beam {j}: {debug_path(prefix_tokens)}")
+                        debug_blocks[i].append("Logits top-5 for next token:")
+                        for j in range(min(3, beam_size)):
+                            debug_blocks[i].append(f"beam {j}: {debug_top_values(logits[i][j], 5)}")
                 argsort = torch.argsort(logits, dim=-1, descending=True)[:, :, :beam_size]
                 tmp_clen = tmp_clen + 1
                 tmp_prefix = tmp_prefix.scatter_(dim=-1, index=tmp_clen.unsqueeze(-1), src=argsort.unsqueeze(-1))
@@ -394,6 +462,14 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                 prob = lprob[i][j].item() / int(l / 2)
                             else:
                                 prob = lprob[i][j].item()
+                            if count < 3 and i < debug_limit:
+                                path_tokens = prefix[i][j, :l + 1].detach().cpu().tolist()
+                                debug_blocks[i].extend([
+                                    "[COLLECT CANDIDATE]",
+                                    f"Candidate entity: {debug_token(candidate)}",
+                                    f"Score: {prob:.6f}",
+                                    f"Path: {debug_path(path_tokens)}",
+                                ])
                             lprob[i][j] -= 10000
                             if candidate not in candidates[i]:
                                 if args.self_consistency:
@@ -417,6 +493,14 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                 prob = lprob[i][j].item() / int(max_len/2)
                             else:
                                 prob = lprob[i][j].item()
+                            if count < 3 and i < debug_limit:
+                                path_tokens = prefix[i][j, :l + 1].detach().cpu().tolist()
+                                debug_blocks[i].extend([
+                                    "[COLLECT CANDIDATE]",
+                                    f"Candidate entity: {debug_token(candidate)}",
+                                    f"Score: {prob:.6f}",
+                                    f"Path: {debug_path(path_tokens)}",
+                                ])
                             if candidate not in candidates[i]:
                                 if args.self_consistency:
                                     candidates[i][candidate] = math.exp(prob)
@@ -431,15 +515,19 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                 else:                             
                                     candidates[i][candidate] = max(candidates[i][candidate], prob)
             target = samples["target"].cpu()
-            if count < 5:
-                print("\n[BEFORE FILTER]")
-                print("Gold:", target[i].item())
-                for k, v in list(candidates[i].items())[:10]:
-                    print(k, v)
             for i in range(batch_size):
+                debug_sample = count < 3 and i < debug_limit
                 hid = samples["head_id"][i].item()
                 rid = samples["relation_id"][i].item()
                 index = vocab_size * rid + hid
+                if debug_sample:
+                    debug_gold = target[i].detach().cpu().view(-1)[0].tolist()
+                    debug_blocks[i].extend([
+                        "[BEFORE FILTER]",
+                        "Top candidates (id, score):",
+                    ])
+                    debug_blocks[i].extend(debug_candidate_lines(candidates[i]))
+                    debug_blocks[i].append(f"Gold: {debug_token(debug_gold)}")
                 if index in valid_triples:
                     mask = valid_triples[index]
                     for tid in candidates[i].keys():
@@ -451,16 +539,15 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         else:
                             if tid in mask:
                                 candidates[i][tid] -= 100000
+                if debug_sample:
+                    debug_blocks[i].extend([
+                        "[AFTER FILTER]",
+                        "Top candidates (id, score):",
+                    ])
+                    debug_blocks[i].extend(debug_candidate_lines(candidates[i]))
                 count += 1
                 candidate_ = sorted(zip(candidates[i].items(), candidates_path[i].items()), key=lambda x:x[0][1], reverse=True)
                 candidate_ids = [pair[0][0] for pair in candidate_]
-                if count < 5:
-                    gold = target[i].item()
-
-                    print("\n[BEAM DEBUG]")
-                    print("Gold:", gold)
-                    print("Top candidates:", candidate_ids[:10])
-                    print("Gold in candidates:", gold in candidate_ids)
                 candidate_path = [pair[1][1] for pair in candidate_]
                 if candidate_ids:
                     candidate = torch.as_tensor(candidate_ids, dtype=torch.long)
@@ -492,12 +579,19 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 else:
                     path_token += "wrong"
                 lines.append(path_token+'\n')
-
-                if count < 5:
-                    print("\n[RANK DEBUG]")
-                    print("Gold:", target_id)
-                    print("Final ranked (top10):", candidate_ids[:10])
-                    print("Final rank:", rank_idx)
+                if debug_sample:
+                    rank_text = rank_idx + 1 if rank_idx is not None else None
+                    top1 = candidate_ids[0] if candidate_ids else None
+                    debug_blocks[i].extend([
+                        "[RANKING]",
+                        f"Sorted candidates: {candidate_ids}",
+                        "Sorted decoded: " + " | ".join(debug_token(candidate_id) for candidate_id in candidate_ids),
+                        f"Gold: {debug_token(target_id)}",
+                        f"Rank: {rank_text}",
+                        f"Top-1: {debug_token(top1) if top1 is not None else None}",
+                        "========================================",
+                    ])
+                    write_tqdm_block("\n".join(debug_blocks[i]))
 
                 if len(preview_blocks) < preview_limit:
                     preview_blocks.append(
@@ -516,10 +610,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                             bos=bos,
                         )
                     )
-            if count < 5:
-                print("\n[AFTER FILTER]")
-                for k, v in list(candidates[i].items())[:10]:
-                    print(k, v)
     
     if args.output_path:
         with open("test_output_squire.txt", "w") as f:
