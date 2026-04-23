@@ -56,7 +56,7 @@ def get_args():
     # question input related
     parser.add_argument("--question-file", default="kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
     parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
-    parser.add_argument("--eval-preview-count", default=1, type=int, help="number of readable evaluation examples to print per split; set to 0 to disable")
+    parser.add_argument("--eval-preview-count", default=0, type=int, help="number of readable evaluation examples to print per split; set to 0 to disable")
     parser.add_argument("--eval-preview-topk", default=3, type=int, help="number of top predictions to show inside each evaluation preview")
     parser.add_argument("--train-preview-count", default=0, type=int, help="number of readable training examples to print per preview; set to 0 to disable")
     parser.add_argument("--train-preview-interval", default=100, type=int, help="print readable training preview every N optimizer steps when enabled")
@@ -281,6 +281,34 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count))
             )
             batch_size = samples["input_ids"].size(0)
+
+            if count < 5:
+                debug_prefix = torch.zeros([batch_size, 3], dtype=torch.long).to(device)
+                debug_prefix[:, 0] = model.dictionary.bos()
+                debug_prefix[:, 1] = samples["head_id"]
+                debug_prefix[:, 2] = samples["relation_id"]
+
+                debug_logits = model.logits(
+                    samples["input_ids"],
+                    samples["attention_mask"],
+                    debug_prefix
+                )[:, -1, :]  # last position predicts entity
+
+                probs = F.softmax(debug_logits, dim=-1)
+                topk = torch.topk(probs, k=10, dim=-1)
+
+                for i in range(min(3, batch_size)):
+                    gold = samples["target"][i].item()
+
+                    sorted_ids = torch.argsort(probs[i], descending=True)
+                    rank = (sorted_ids == gold).nonzero(as_tuple=False)
+                    rank = rank.item() if rank.numel() > 0 else None
+
+                    print("\n[LOGITS ENTITY DEBUG]")
+                    print("Gold:", gold)
+                    print("Top-10:", topk.indices[i].tolist())
+                    print("Gold rank:", rank)
+
             candidates = [dict() for i in range(batch_size)]
             candidates_path = [dict() for i in range(batch_size)]
             input_ids = samples["input_ids"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
