@@ -27,7 +27,7 @@ def filter_rule(path, thrshd_num, thrshd_ratio):
     rel2paths = dict()
     rel2scores = dict()
     rel2rules = dict()
-    with open('../data/'+args.dataset+'/relation2id.txt', 'r') as f:
+    with open(args.dataset+'/relation2id.txt', 'r') as f:
         for line in f.readlines():
             rel, N = line.strip().split('\t')
     N = int(N) + 1
@@ -81,7 +81,7 @@ def filter_rule(path, thrshd_num, thrshd_ratio):
                 
     for k in rel2paths.keys():
         rel2rules[k] = sorted(zip(rel2scores[k], rel2paths[k]), key=lambda pair: pair[0], reverse=True)
-    with open('../data/'+args.dataset+'/rules.dict', 'w') as f:
+    with open(args.dataset+'/rules.dict', 'w') as f:
         json.dump(rel2rules, f)
 
 if __name__ == "__main__":
