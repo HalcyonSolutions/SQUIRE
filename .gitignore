@@ -12,6 +12,7 @@ models_new/
 AnyBURL/path1/
 AnyBURL/path_kinship/
 AnyBURL/path_kinship_question_input/
+AnyBURL/path_kinship_qa/
 
 # IDE / temp files
 *.swp
