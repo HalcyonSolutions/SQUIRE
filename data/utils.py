@@ -22,6 +22,7 @@ def get_args():
     parser.add_argument("--gen-mapping", default=False, action="store_true") # generate mapping files: entity2id, relation2id
     parser.add_argument("--gen-eval-data", default=False, action="store_true") # generate files for evaluation
     parser.add_argument("--gen-train-data", default=False, action="store_true") # generate files for train (sample path)
+    parser.add_argument("--skip-reverse-augmentation", default=False, action="store_true") # dataset already contains reverse relations
     args = parser.parse_args()
     return args
 
@@ -70,22 +71,25 @@ def gen_mapping(args):
         f.writelines(rel_lines)
     print("-------finish mapping files-------")
 
-def gen_eval(train_triples, valid_triples, test_triples, relation2id):
+def gen_eval(train_triples, valid_triples, test_triples, relation2id, args):
     print("-------generating evaluation files-------")
     rel_num = len(relation2id)
+    augment_reverse = not args.skip_reverse_augmentation
     # valid and test file
     valid_line = []
     valid_line_rev = []
     for valid_triple in valid_triples:
         h, r, t = valid_triple
         valid_line.append(str(h)+'\t'+'R'+str(r)+'\t'+str(t)+'\n')
-        valid_line_rev.append(str(t)+'\t'+'R'+str(r+rel_num)+'\t'+str(h)+'\n')
+        if augment_reverse:
+            valid_line_rev.append(str(t)+'\t'+'R'+str(r+rel_num)+'\t'+str(h)+'\n')
     test_line = []
     test_line_rev = []
     for test_triple in test_triples:
         h, r, t = test_triple
         test_line.append(str(h)+'\t'+'R'+str(r)+'\t'+str(t)+'\n')
-        test_line_rev.append(str(t)+'\t'+'R'+str(r+rel_num)+'\t'+str(h)+'\n')
+        if augment_reverse:
+            test_line_rev.append(str(t)+'\t'+'R'+str(r+rel_num)+'\t'+str(h)+'\n')
     with open(os.path.join(args.dataset, 'valid_triples.txt'), 'w') as f:
         f.writelines(valid_line)
     with open(os.path.join(args.dataset, 'valid_triples_rev.txt'), 'w') as f:
@@ -101,7 +105,8 @@ def gen_eval(train_triples, valid_triples, test_triples, relation2id):
     for triple in train_triples:
         h, r, t = triple
         train_line.append(str(h)+'\t'+'R'+str(r)+'\t'+str(t)+'\n')
-        train_line_rev.append(str(t)+'\t'+'R'+str(r+rel_num)+'\t'+str(h)+'\n')
+        if augment_reverse:
+            train_line_rev.append(str(t)+'\t'+'R'+str(r+rel_num)+'\t'+str(h)+'\n')
     with open(os.path.join(args.dataset, 'train_triples.txt'), 'w') as f:
         f.writelines(train_line)
     with open(os.path.join(args.dataset, 'train_triples_rev.txt'), 'w') as f:
@@ -202,8 +207,9 @@ def gen_train(train_triples, relation2id, args):
     all_reverse_triples = []
     connected = dict() # {start: {end1: [edge11, edge12, ...], end2: [edge21, edge22, ...], ...}, ...}
     adjacent = dict() # {start: {edge1: [end11, end12, ...]}, edge2: [end21, end22, ...], ...}, ...}
-    for triple in all_true_triples:
-        all_reverse_triples.append((triple[2], triple[1] + rel_num, triple[0]))
+    if not args.skip_reverse_augmentation:
+        for triple in all_true_triples:
+            all_reverse_triples.append((triple[2], triple[1] + rel_num, triple[0]))
     all_triples = all_reverse_triples + all_true_triples
     # all_triples = all_true_triples
     for triple in all_triples:
@@ -258,9 +264,10 @@ def gen_train(train_triples, relation2id, args):
                 for n in range(num):
                     in_line.append(str(start)+' '+'R'+str(edge)+'\n')
                     out_line.append('R'+str(edge)+' '+str(end)+'\n')
-                for n in range(num):
-                    in_line.append(str(end)+' '+'R'+str(edge+rel_num)+'\n')
-                    out_line.append('R'+str(edge+rel_num)+' '+str(start)+'\n')
+                if not args.skip_reverse_augmentation:
+                    for n in range(num):
+                        in_line.append(str(end)+' '+'R'+str(edge+rel_num)+'\n')
+                        out_line.append('R'+str(edge+rel_num)+' '+str(start)+'\n')
             # print(num)
             paths1 = paths + sample_path(len2paths, num)
             paths2 = paths + sample_path(len2paths, num)
@@ -269,7 +276,8 @@ def gen_train(train_triples, relation2id, args):
             paths2 = paths
         #print(paths1)
         write_path(start, edge, paths1, in_line, out_line, rel_num, rev=False)
-        write_path(end, edge, paths2, in_line, out_line, rel_num, rev=True)
+        if not args.skip_reverse_augmentation:
+            write_path(end, edge, paths2, in_line, out_line, rel_num, rev=True)
         #print(num, triple, out_line[-12:-6], out_line[-6:])
 
     with open(os.path.join(args.dataset, 'in_'+args.out+'.txt'), 'w') as f:
@@ -396,7 +404,7 @@ if __name__ == "__main__":
     test_triples = read_triple(os.path.join(args.dataset, 'test.txt'), entity2id, relation2id)
     # generate eval data files
     if args.gen_eval_data:
-        gen_eval(train_triples, valid_triples, test_triples, relation2id)
+        gen_eval(train_triples, valid_triples, test_triples, relation2id, args)
     # generate train data files
     if args.gen_train_data:
         gen_train(train_triples, relation2id, args)

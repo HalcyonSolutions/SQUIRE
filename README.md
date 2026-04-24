@@ -19,6 +19,8 @@ python utils.py --dataset FB15K237 --gen-mapping --gen-eval-data --gen-train-dat
 ```
 To run our model on new datasets, it suffices to provide `train.txt`, `valid.txt`, `test.txt` files.
 
+If your dataset already includes reverse relations in those files, add `--skip-reverse-augmentation` so `utils.py` does not synthesize another reversed copy.
+
 If using *rule-enhanced learning*, first generate mapping files by running:
 ```
 python utils.py --dataset FB15K237 --gen-mapping --gen-eval-data
