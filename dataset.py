@@ -320,7 +320,6 @@ class TestDataset(Dataset):
         question = str(row["Question"])
         answer = str(row["Answer-Entity"])
         head = str(row["Source-Entity"])
-        relation = str(row["Query-Relation"])
         encoded_question = self.tokenizer(
             question,
             padding='max_length',
@@ -338,18 +337,9 @@ class TestDataset(Dataset):
         except KeyError:
             raise ValueError(f"Unknown head entity: {head}")
 
-        try:
-            relation_id = self.relation2id[relation]
-            relation_id = "R"+relation_id
-        except KeyError:
-            raise ValueError(f"Unknown head entity: {head}")
-
         head_id = self.dictionary.indices.get(head_id)
         if head_id is None:
             raise ValueError(f"Head token not in dictionary: {head_id}")
-        relation_id = self.dictionary.indices.get(relation_id)
-        if relation_id is None:
-            raise ValueError(f"Relation token not in dictionary: {relation_id}")
 
         target_id = self.dictionary.encode_line([answer_id])[:-1]
         return {
@@ -358,7 +348,6 @@ class TestDataset(Dataset):
             "attention_mask": encoded_question["attention_mask"].squeeze(0),
             "target": target_id,
             "head_id": torch.tensor(head_id, dtype=torch.long),
-            "relation_id": torch.tensor(relation_id, dtype=torch.long)
         }
 
     def collate_fn(self, samples):
@@ -367,7 +356,6 @@ class TestDataset(Dataset):
         attention_mask = torch.stack([sample["attention_mask"] for sample in samples])
         target = torch.LongTensor(bsz, 1)
         head_id = torch.LongTensor(bsz)
-        relation_id = torch.LongTensor(bsz)
 
         ids =  []
         for idx, sample in enumerate(samples):
@@ -377,7 +365,6 @@ class TestDataset(Dataset):
             attention_mask[idx] = sample["attention_mask"]
             target[idx, 0] = target_ids[0]
             head_id[idx] = sample["head_id"]
-            relation_id[idx] = sample["relation_id"]
         
         return {
             "ids": torch.LongTensor(ids).to(self.device),
@@ -385,5 +372,4 @@ class TestDataset(Dataset):
             "attention_mask": attention_mask.to(self.device),
             "target": target.to(self.device),
             "head_id": head_id.to(self.device),
-            "relation_id": relation_id.to(self.device),
         }

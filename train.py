@@ -350,7 +350,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 for i in range(debug_limit):
                     sample_id = samples["ids"][i].detach().cpu().tolist() if "ids" in samples else count + i
                     head_id = samples["head_id"][i].detach().cpu().tolist()
-                    relation_id = samples["relation_id"][i].detach().cpu().tolist()
+                    # relation_id = samples["relation_id"][i].detach().cpu().tolist()
                     target_id = samples["target"][i].detach().cpu().view(-1)[0].tolist()
                     debug_blocks.append([
                         "================ SAMPLE =================",
@@ -358,7 +358,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         f"Sample ID: {sample_id}",
                         f"Question: {debug_question(sample_id)}",
                         f"Head ID: {debug_token(head_id)}",
-                        f"Relation ID: {debug_token(relation_id)}",
+                        # f"Relation ID: {debug_token(relation_id)}",
                         f"Target ID: {debug_token(target_id)}",
                     ])
 
@@ -545,8 +545,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             for i in range(batch_size):
                 debug_sample = count < 2 and i < debug_limit
                 hid = samples["head_id"][i].item()
-                rid = samples["relation_id"][i].item()
-                index = vocab_size * rid + hid
+                # rid = samples["relation_id"][i].item()
+                # index = vocab_size * rid + hid
+                index = None
                 if debug_sample:
                     debug_gold = target[i].detach().cpu().view(-1)[0].tolist()
                     debug_blocks[i].extend([
@@ -555,7 +556,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     ])
                     debug_blocks[i].extend(debug_candidate_lines(candidates[i]))
                     debug_blocks[i].append(f"Gold: {debug_token(debug_gold)}")
-                if index in valid_triples:
+                # if index in valid_triples:
+                if index is not None and index in valid_triples:
                     mask = valid_triples[index]
                     for tid in candidates[i].keys():
                         if tid == target[i].item():
@@ -587,9 +589,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 question_text = get_row_text(row, "Question")
 
                 head_label = decode_token(hid, rev_dict, dataset)
-                relation_label = decode_token(rid, rev_dict, dataset)
+                # relation_label = decode_token(rid, rev_dict, dataset)
                 target_label = decode_token(target_id, rev_dict, dataset)
-                path_token = f"{question_text}\t{head_label} | {relation_label} | {target_label}\t"
+                # path_token = f"{question_text}\t{head_label} | {relation_label} | {target_label}\t"
+                path_token = f"{question_text}\t{head_label} | {target_label}\t"
 
                 if ranking.nelement() != 0:
                     rank_idx = ranking[0].item()
