@@ -1,0 +1,192 @@
+#!/bin/bash
+
+ROOT=path/SQUIRE_FINAL
+DATASET=kinshiphinton
+BASE_DIR=$ROOT
+PATH2DATA=$ROOT/data/$DATASET
+PATH2CSV=$ROOT/data/$DATASET/kinship_hinton_qa_nhop.csv
+PATH2CONFIG=$ROOT/AnyBURL/config-kinshiphinton-question-input.properties
+PATH2AnyBURL=$ROOT/AnyBURL
+PATH2Snapshot=$PATH2AnyBURL/path_kinship_qa/path-20
+MODEL_SAVE=$ROOT/models/kinship_qa
+
+NUM_RULES_FILTER=1
+HOP_NUM=3
+
+cd $BASE_DIR
+
+case "$1" in
+    all)
+        bash "$0" step1 || exit 1
+        bash "$0" step2 || exit 1
+        bash "$0" step3 || exit 1
+        bash "$0" step4 || exit 1
+        bash "$0" train || exit 1
+        ;;
+    step1)
+        echo "Step 1: Verify that the required data files are present in $PATH2DATA"
+        if [ ! -f "$PATH2DATA/train.txt" ]; then
+            echo "Error: train.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/test.txt" ]; then
+            echo "Error: test.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/valid.txt" ]; then
+            echo "Error: valid.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2CSV" ]; then
+            echo "Error: $PATH2CSV not found"
+            exit 1
+        fi
+        if [ ! -f "$PATH2CONFIG" ]; then
+            echo "Error: $PATH2CONFIG not found"
+            exit 1
+        fi
+        echo "  *All required files are present."
+        echo "================================"
+        ;;
+    step2)
+        echo "Step 2: Generate mapping and evaluation data using utils.py"
+        PYTHONPATH="$BASE_DIR" conda run -n squire python "$BASE_DIR/data/utils.py" \
+            --dataset $PATH2DATA \
+            --gen-mapping \
+            --skip-reverse-augmentation \
+            --gen-eval-data
+        
+        if [ ! -f "$PATH2DATA/train_triples_rev.txt" ]; then
+            echo "Error: train_triples_rev.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/train_triples.txt" ]; then
+            echo "Error: train_triples.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/test_triples_rev.txt" ]; then
+            echo "Error: test_triples_rev.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/test_triples.txt" ]; then
+            echo "Error: test_triples.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/valid_triples_rev.txt" ]; then
+            echo "Error: valid_triples_rev.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/valid_triples.txt" ]; then
+            echo "Error: valid_triples.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/relation2id.txt" ]; then
+            echo "Error: relation2id.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        if [ ! -f "$PATH2DATA/entity2id.txt" ]; then
+            echo "Error: entity2id.txt not found in $PATH2DATA"
+            exit 1
+        fi
+        echo "  *All required files for training and evaluation have been generated."
+        echo "================================"
+        ;;
+    step3)
+        echo "Step 3 Run AnyBURL with the configuration file $PATH2CONFIG"
+        (
+            cd "$BASE_DIR/AnyBURL" || exit 1
+
+            # PATH_OUTPUT    = path_kinship_qa/path
+            mkdir -p path_kinship_qa
+
+            java -Xmx1G -cp AnyBURL-JUNO.jar \
+            de.unima.ki.anyburl.LearnReinforced \
+            config-kinshiphinton-question-input.properties
+        )
+        echo "================================"
+        ;;
+    step4)
+        echo "Step 4: Calculate NUM_RULES_FILTER"
+        THRESHOLD=80 # find a number of rules that cover THRESHOLD% all rules
+        NUM_RULES_FILTER=$(gawk -v thresh="$THRESHOLD" '
+        {
+            count[$1]++
+            total++
+        }
+        END {
+            # collect keys
+            for (k in count) {
+                keys[n++] = k
+            }
+
+            # sort ascending
+            asort(keys)
+
+            # cumulative sum from highest → lowest
+            cum = 0
+            for (i = n; i >= 1; i--) {
+                k = keys[i]
+                pct = (count[k] / total) * 100
+                cum += pct
+
+                if (cum >= thresh) {
+                    print k
+                    exit
+                }
+            }
+        }
+        ' "$PATH2Snapshot")
+        echo "  *Calculated NUM_RULES_FILTER: $NUM_RULES_FILTER"
+        # write NUM_RULES_FILTER to a file for later use
+        echo "$NUM_RULES_FILTER" > $PATH2DATA/num_rules_filter.txt
+
+        echo "  *Generating filtered rules and training data with NUM_RULES_FILTER=$NUM_RULES_FILTER"
+        PYTHONPATH="$BASE_DIR" conda run -n squire python "$BASE_DIR/AnyBURL/utils.py" \
+            --dataset $PATH2DATA \
+            --path $PATH2Snapshot \
+            --num $NUM_RULES_FILTER \
+            --ratio 0.6
+
+        PYTHONPATH="$BASE_DIR" conda run -n squire python "$BASE_DIR/check_relations.py" \
+            --path $PATH2DATA/rules.dict
+
+        echo "  *Generating training data with the filtered rules"
+        PYTHONPATH="$BASE_DIR" conda run -n squire python "$BASE_DIR/data/utils.py" \
+            --dataset $PATH2DATA \
+            --gen-train-data \
+            --num $NUM_RULES_FILTER \
+            --out ${NUM_RULES_FILTER}_rev_rule \
+            --skip-reverse-augmentation \
+
+        echo "================================"
+        ;;
+    train)
+        echo "Finally :) Training"
+
+        # read NUM_RULES_FILTER from file
+        NUM_RULES_FILTER=$(cat $PATH2DATA/num_rules_filter.txt)
+        echo "  *Using NUM_RULES_FILTER=$NUM_RULES_FILTER for training"
+
+        PYTHONUNBUFFERED=1 PYTHONPATH="$BASE_DIR" conda run  --no-capture-output -n squire python "$BASE_DIR/train.py" \
+            --encoder \
+            --dataset $DATASET \
+            --trainset ${NUM_RULES_FILTER}_rev_rule \
+            --max-len $HOP_NUM \
+            --num-epoch 300 \
+            --batch-size 64 \
+            --test-batch-size 32 \
+            --beam-size 40 \
+            --save-dir $MODEL_SAVE \
+            --question-file kinship_hinton_qa_nhop.csv \
+            --output-path \
+            --validate-during-training \
+            --validate-interval 10
+        
+        echo "  *Training completed. Model saved to $MODEL_SAVE"
+        echo "================================"
+        ;;
+    *)
+        echo "Usage: bash run.sh [step0|step1|step2]"
+        exit 1
+        ;;
+esac
