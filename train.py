@@ -57,6 +57,7 @@ def get_args():
     # question input related
     parser.add_argument("--question-file", default="kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
     parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
+    parser.add_argument("--num-workers", default=0, type=int, help="number of DataLoader worker processes, CPU-only when > 0; set to 0 to disable multiprocessing")
     parser.add_argument("--eval-preview-count", default=0, type=int, help="number of readable evaluation examples to print per split; set to 0 to disable")
     parser.add_argument("--eval-preview-topk", default=3, type=int, help="number of top predictions to show inside each evaluation preview")
     parser.add_argument("--train-preview-count", default=0, type=int, help="number of readable training examples to print per preview; set to 0 to disable")
@@ -276,6 +277,15 @@ def write_tqdm_block(block):
     for line in block.splitlines():
         tqdm.write(line)
 
+def move_batch_to_device(batch, device):
+    moved = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value):
+            moved[key] = value.to(device, non_blocking=True)
+        else:
+            moved[key] = value
+    return moved
+
 def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=None, split_name="eval"):
     model.eval()
     beam_size = args.beam_size
@@ -360,6 +370,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
 
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
+            samples = move_batch_to_device(samples, device)
             pbar.set_description(
                 "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@10: %f"
                 % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count))
@@ -747,16 +758,23 @@ def train(args):
                     )
     logging.info(args)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    loader_kwargs = {
+        "num_workers": max(0, args.num_workers),
+        "pin_memory": device == "cuda",
+    }
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
     valid_split = resolve_validation_split(args.dataset + "/", args.question_file)
     valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split=valid_split, args=args)
     test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", split="test", args=args)
     train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", split="train", args=args)
     train_valid, eval_valid = train_set.get_next_valid()
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True, num_workers=4)
-    valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
-    test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
-    train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True, **loader_kwargs)
+    valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, **loader_kwargs)
+    test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, **loader_kwargs)
+    train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False, **loader_kwargs)
+    # valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
+    # test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
+    # train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False)
     
     model = TransformerModel(args, train_set.dictionary).to(device)
     train_preview_rev_dict = build_rev_dict(train_set.dictionary)
@@ -824,6 +842,7 @@ def train(args):
             token_accs = []
             last_accs = []
             for batch_idx, samples in enumerate(pbar):
+                samples = move_batch_to_device(samples, device)
                 optimizer.zero_grad()
                 loss = model.get_loss(**samples)
                 loss.backward()
@@ -948,9 +967,14 @@ def checkpoint(args):
                     '%(asctime)s - %(pathname)s[line:%(lineno)d] - %(levelname)s: %(message)s'
                     )
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    loader_kwargs = {
+        "num_workers": max(0, args.num_workers),
+        "pin_memory": device == "cuda",
+    }
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, args=args)
     test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", args=args)
-    test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
+    # test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
+    test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, **loader_kwargs)
     train_valid, eval_valid = train_set.get_next_valid()
     model = TransformerModel(args, train_set.dictionary)
     model.load_state_dict(torch.load(os.path.join(ckpt_path, args.ckpt)))

@@ -351,14 +351,16 @@ class Seq2SeqDataset(Dataset):
             target[idx, 0: sample["tgt_length"]] = target_ids
             mask[idx, 0: sample["tgt_length"]] = sample["mask"]
 
+        # Keep worker processes CPU-only. The training loop moves tensor batches
+        # to the target device after DataLoader returns them.
         return {
-            "ids": torch.LongTensor(ids).to(self.device),
-            "lengths": torch.LongTensor(lens).to(self.device),
-            "input_ids": input_ids.to(self.device),
-            "attention_mask": attention_mask.to(self.device),
-            "prev_outputs": prev_outputs.to(self.device),
-            "target": target.to(self.device),
-            "mask": mask.to(self.device),
+            "ids": torch.LongTensor(ids),
+            "lengths": torch.LongTensor(lens),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "prev_outputs": prev_outputs,
+            "target": target,
+            "mask": mask,
         }
 
     def _add_valid_triple(self, valid_dict, h, r, t, vocab_size, eos):
@@ -589,10 +591,12 @@ class TestDataset(Dataset):
             target[idx, 0] = target_ids[0]
             head_id[idx] = sample["head_id"]
         
+        # Keep worker processes CPU-only. The evaluation loop moves tensor
+        # batches to the target device after DataLoader returns them.
         return {
-            "ids": torch.LongTensor(ids).to(self.device),
-            "input_ids": input_ids.to(self.device),
-            "attention_mask": attention_mask.to(self.device),
-            "target": target.to(self.device),
-            "head_id": head_id.to(self.device),
+            "ids": torch.LongTensor(ids),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "target": target,
+            "head_id": head_id,
         }
