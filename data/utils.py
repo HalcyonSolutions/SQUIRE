@@ -290,23 +290,25 @@ def find_path(connected, start, end, max_len=3):
     paths = []
     if start not in connected:
         return [[]]
+    start_neighbors = connected[start]
     # one-hop
     path1 = []
-    if end in connected[start]:
-        for label in connected[start][end]:
+    if end in start_neighbors:
+        for label in start_neighbors[end]:
             path1.append([start, label, end])
     paths.append(path1)
     if max_len == 1:
         return paths
     # two-hop
     path2 = []
-    for mid in connected[start]:
+    for mid in start_neighbors:
         if mid == end or mid == start:
             continue
-        if end not in connected[mid]:
+        mid_neighbors = connected.get(mid)
+        if mid_neighbors is None or end not in mid_neighbors:
             continue
-        labels1 = connected[start][mid]
-        labels2 = connected[mid][end]
+        labels1 = start_neighbors[mid]
+        labels2 = mid_neighbors[end]
         for label2 in labels2:
             for label1 in labels1:
                 path2.append([start, label1, mid, label2, end])
@@ -315,17 +317,21 @@ def find_path(connected, start, end, max_len=3):
         return paths
     # three-hop
     path3 = []
-    for mid1 in connected[start]:
+    for mid1 in start_neighbors:
         if mid1 == end or mid1 == start:
             continue
-        for mid2 in connected[mid1]:
+        mid1_neighbors = connected.get(mid1)
+        if mid1_neighbors is None:
+            continue
+        for mid2 in mid1_neighbors:
             if mid2 == end or mid2 == start or mid2 == mid1:
                 continue
-            if end not in connected[mid2]:
+            mid2_neighbors = connected.get(mid2)
+            if mid2_neighbors is None or end not in mid2_neighbors:
                 continue
-            labels1 = connected[start][mid1]
-            labels2 = connected[mid1][mid2]
-            labels3 = connected[mid2][end]
+            labels1 = start_neighbors[mid1]
+            labels2 = mid1_neighbors[mid2]
+            labels3 = mid2_neighbors[end]
             for label3 in labels3:
                 for label2 in labels2:
                     for label1 in labels1:
@@ -335,21 +341,28 @@ def find_path(connected, start, end, max_len=3):
         return paths
     # four-hop
     path4 = []
-    for mid1 in connected[start]:
+    for mid1 in start_neighbors:
         if mid1 == end or mid1 == start:
             continue
-        for mid2 in connected[mid1]:
+        mid1_neighbors = connected.get(mid1)
+        if mid1_neighbors is None:
+            continue
+        for mid2 in mid1_neighbors:
             if mid2 == end or mid2 == start or mid2 == mid1:
                 continue
-            for mid3 in connected[mid2]:
+            mid2_neighbors = connected.get(mid2)
+            if mid2_neighbors is None:
+                continue
+            for mid3 in mid2_neighbors:
                 if mid3 == end or mid3 == start or mid3 == mid1 or mid3 == mid2:
                     continue
-                if end not in connected[mid3]:
+                mid3_neighbors = connected.get(mid3)
+                if mid3_neighbors is None or end not in mid3_neighbors:
                     continue
-                labels1 = connected[start][mid1]
-                labels2 = connected[mid1][mid2]
-                labels3 = connected[mid2][mid3]
-                labels4 = connected[mid3][end]
+                labels1 = start_neighbors[mid1]
+                labels2 = mid1_neighbors[mid2]
+                labels3 = mid2_neighbors[mid3]
+                labels4 = mid3_neighbors[end]
                 for label4 in labels4:
                     for label3 in labels3:
                         for label2 in labels2:
