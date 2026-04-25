@@ -145,6 +145,34 @@ def test_output_is_deterministic_for_same_input(cpu_model, dummy_batch):
 
     torch.testing.assert_close(logits_1, logits_2)
 
+def test_cached_question_encoding_reuses_bert(cpu_model, dummy_batch, monkeypatch):
+    input_ids, attention_mask, prev_outputs = dummy_batch
+    bert_calls = {"count": 0}
+    original_forward = cpu_model.bert.forward
+
+    def counted_forward(*args, **kwargs):
+        bert_calls["count"] += 1
+        return original_forward(*args, **kwargs)
+
+    monkeypatch.setattr(cpu_model.bert, "forward", counted_forward)
+
+    with torch.no_grad():
+        encoded_source = cpu_model.encode_question(input_ids, attention_mask)
+        calls_after_encode = bert_calls["count"]
+        cached_logits = cpu_model.logits(
+            input_ids,
+            attention_mask,
+            prev_outputs,
+            encoded_source=encoded_source,
+        )
+        calls_after_cached_logits = bert_calls["count"]
+        uncached_logits = cpu_model.logits(input_ids, attention_mask, prev_outputs)
+
+    assert calls_after_encode == 1
+    assert calls_after_cached_logits == 1
+    assert bert_calls["count"] == 2
+    torch.testing.assert_close(cached_logits, uncached_logits)
+
 def test_loss_decreases_one_step(cpu_model, dummy_batch):
     input_ids, attention_mask, prev_outputs = dummy_batch
     target = prev_outputs.clone()
@@ -161,4 +189,3 @@ def test_loss_decreases_one_step(cpu_model, dummy_batch):
         loss2 = cpu_model.get_loss(input_ids, attention_mask, prev_outputs, target, mask)
 
     assert loss2 <= loss1.detach() or torch.isclose(loss2, loss1.detach())
-

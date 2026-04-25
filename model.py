@@ -136,9 +136,9 @@ class TransformerModel(nn.Module):
     def init_weights(self):
         xavier_normal_(self.encoder.weight.data)
 
-    def logits(self, input_ids, attention_mask, prev_outputs, **unused):
+    def encode_question(self, input_ids, attention_mask):
+        """Encode the immutable question once so evaluation can reuse it across beams."""
         bsz = input_ids.size(0)
-        out_len = prev_outputs.size(1)
         device = input_ids.device
         with torch.no_grad():
             bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
@@ -148,9 +148,24 @@ class TransformerModel(nn.Module):
         src_len = source.size(0)
         source += self.pos_encoder(bsz, 0, src_len)
         source = source.to(device)
+        return source
+
+    def logits(self, input_ids, attention_mask, prev_outputs, encoded_source=None, **unused):
+        bsz = prev_outputs.size(0)
+        out_len = prev_outputs.size(1)
+        device = prev_outputs.device
+        if encoded_source is None:
+            source = self.encode_question(input_ids, attention_mask)
+        else:
+            source = encoded_source.to(device)
+        if source.size(1) != bsz:
+            raise ValueError(
+                f"encoded_source batch size mismatch: expected {bsz}, got {source.size(1)}"
+            )
         mask = self._generate_square_subsequent_mask(prev_outputs.size(-1))
         prev_outputs = prev_outputs.transpose(0, 1)
         prev_outputs = self.encoder(prev_outputs)
+        src_len = source.size(0)
         prev_outputs += self.pos_encoder(bsz, src_len, out_len)
         if self.args.encoder:
             enmask = torch.zeros(out_len + src_len, out_len + src_len)

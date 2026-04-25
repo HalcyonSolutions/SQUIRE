@@ -12,6 +12,7 @@ from tqdm import tqdm
 import logging
 import ast
 import transformers
+import pandas as pd
 from iterative_training import Iter_trainer
 import math
 import matplotlib
@@ -164,6 +165,27 @@ def format_generated_path(head_label, path_tokens, rev_dict, dataset, eos, bos):
         parts.append(f"--{pending_relation}--> ?")
 
     return " ".join(parts)
+
+def resolve_validation_split(dataset_path, question_file):
+    if not question_file:
+        return "test"
+    csv_file = os.path.join(dataset_path, question_file)
+    try:
+        split_labels = pd.read_csv(csv_file, usecols=["SplitLabel"])["SplitLabel"].dropna()
+    except (FileNotFoundError, ValueError, KeyError, pd.errors.EmptyDataError):
+        return "test"
+
+    # Prefer an explicit validation split when it exists, while keeping the
+    # previous test fallback for datasets that only ship train/test questions.
+    normalized = {}
+    for label in split_labels.astype(str):
+        clean_label = label.strip()
+        normalized[clean_label.lower()] = clean_label
+    if "dev" in normalized:
+        return normalized["dev"]
+    if "valid" in normalized:
+        return normalized["valid"]
+    return "test"
 
 def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos):
     row = None
@@ -393,6 +415,15 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             candidates_path = [dict() for i in range(batch_size)]
             input_ids = samples["input_ids"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
             attention_mask = samples["attention_mask"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
+            # The question encoder input is identical for every beam in the
+            # batch, so compute it once and expand the cached states instead of
+            # re-running BERT for every beam step.
+            question_source = model.encode_question(samples["input_ids"], samples["attention_mask"])
+            beam_question_source = question_source.unsqueeze(2).repeat(1, 1, beam_size, 1).reshape(
+                question_source.size(0),
+                batch_size * beam_size,
+                question_source.size(-1),
+            )
             prefix = torch.zeros([batch_size, beam_size, max_len], dtype=torch.long).to(device)
             prefix[:, :, 0].fill_(model.dictionary.bos())
             lprob = torch.zeros([batch_size, beam_size]).to(device)
@@ -405,7 +436,12 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             if count < 2:
                 for i in range(debug_limit):
                     debug_blocks[i].extend(debug_model_input_lines(tmp_input_ids[i], tmp_attention_mask[i], tmp_prefix[i]))
-            logits = model.logits(tmp_input_ids, tmp_attention_mask, tmp_prefix).squeeze(1)
+            logits = model.logits(
+                tmp_input_ids,
+                tmp_attention_mask,
+                tmp_prefix,
+                encoded_source=question_source,
+            ).squeeze(1)
             logits = F.log_softmax(logits, dim=-1)
             logits = logits.view(-1, vocab_size)
             argsort = torch.argsort(logits, dim=-1, descending=True)[:, :beam_size]
@@ -431,7 +467,12 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         for j in range(min(3, beam_size)):
                             debug_blocks[i].append(f"beam {j}:")
                             debug_blocks[i].extend(debug_model_input_lines(input_ids[i][j], attention_mask[i][j], prefix[i][j]))
-                all_logits = model.logits(input_ids.view(bb, -1), attention_mask.view(bb, -1), prefix.view(bb, -1)).view(batch_size, beam_size, max_len, -1)
+                all_logits = model.logits(
+                    input_ids.view(bb, -1),
+                    attention_mask.view(bb, -1),
+                    prefix.view(bb, -1),
+                    encoded_source=beam_question_source,
+                ).view(batch_size, beam_size, max_len, -1)
                 logits = torch.gather(input=all_logits, dim=2, index=clen.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 1, vocab_size)).squeeze(2)
                 # relation slots use the previously predicted head; head slots use (head, relation)
                 if args.no_filter_gen:
@@ -707,11 +748,12 @@ def train(args):
     logging.info(args)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
-    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split="test", args=args) # in kinship there's no valid set
+    valid_split = resolve_validation_split(args.dataset + "/", args.question_file)
+    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split=valid_split, args=args)
     test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", split="test", args=args)
     train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", split="train", args=args)
     train_valid, eval_valid = train_set.get_next_valid()
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True, num_workers=4)
     valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
     test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
     train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False)
@@ -724,24 +766,24 @@ def train(args):
     warmup_steps = total_step_num / args.warmup
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, total_step_num)
     
-    if args.iter:
-        iter_trainer = Iter_trainer(args.dataset, args.iter_batch_size, 32, 4)
-        iter_epoch = []
-        max_len = args.max_len
-        total = 0
-        for i in range(1, max_len+1):
-            total += (1/i)
-        epochs = 0
-        for i in range(1, max_len+1):
-            iter_epoch.append(int(args.num_epoch/(total*i)))
-            epochs += int(args.num_epoch/(total*i))
-        iter_epoch[-1] += (args.num_epoch-epochs)
-        curr_iter = -1
-        curr_iter_epoch = 0
-        logging.info(
-                    "[Iter0: %d] [Iter1: %d] [Iter2: %d]"
-                    % (iter_epoch[0], iter_epoch[1], iter_epoch[2])
-                    )
+    # if args.iter:
+    #     iter_trainer = Iter_trainer(args.dataset, args.iter_batch_size, 32, 4)
+    #     iter_epoch = []
+    #     max_len = args.max_len
+    #     total = 0
+    #     for i in range(1, max_len+1):
+    #         total += (1/i)
+    #     epochs = 0
+    #     for i in range(1, max_len+1):
+    #         iter_epoch.append(int(args.num_epoch/(total*i)))
+    #         epochs += int(args.num_epoch/(total*i))
+    #     iter_epoch[-1] += (args.num_epoch-epochs)
+    #     curr_iter = -1
+    #     curr_iter_epoch = 0
+    #     logging.info(
+    #                 "[Iter0: %d] [Iter1: %d] [Iter2: %d]"
+    #                 % (iter_epoch[0], iter_epoch[1], iter_epoch[2])
+    #                 )
     best_hit1 = -float("inf")
     best_epoch = -1
     metric_history = {
@@ -757,25 +799,25 @@ def train(args):
     }
     steps = 0
     for epoch in range(args.num_epoch):
-        if args.iter:
-            if curr_iter_epoch == 0: # start next iteration
-                curr_iter += 1
-                curr_iter_epoch = iter_epoch[curr_iter]
-                # label new dataset
-                if curr_iter > 0:
-                    logging.info("--------Iterating--------")
-                    (src_lines, tgt_lines) = iter_trainer.get_iter(model, curr_iter)
-                    train_set.src_lines += src_lines
-                    train_set.tgt_lines += tgt_lines
-                    train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True)
-                # new scheduler
-                step_num = len(train_loader) * curr_iter_epoch
-                warmup_steps = step_num / args.warmup
-                if curr_iter != 0:
-                    optimizer = optim.Adam(model.parameters(), lr=args.lr / 5, weight_decay=args.weight_decay) # fine-tuning with smaller lr
-                    warmup_steps = 0
-                scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, step_num)
-            curr_iter_epoch -= 1
+        # if args.iter:
+        #     if curr_iter_epoch == 0: # start next iteration
+        #         curr_iter += 1
+        #         curr_iter_epoch = iter_epoch[curr_iter]
+        #         # label new dataset
+        #         if curr_iter > 0:
+        #             logging.info("--------Iterating--------")
+        #             (src_lines, tgt_lines) = iter_trainer.get_iter(model, curr_iter)
+        #             train_set.src_lines += src_lines
+        #             train_set.tgt_lines += tgt_lines
+        #             train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True)
+        #         # new scheduler
+        #         step_num = len(train_loader) * curr_iter_epoch
+        #         warmup_steps = step_num / args.warmup
+        #         if curr_iter != 0:
+        #             optimizer = optim.Adam(model.parameters(), lr=args.lr / 5, weight_decay=args.weight_decay) # fine-tuning with smaller lr
+        #             warmup_steps = 0
+        #         scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, step_num)
+        #     curr_iter_epoch -= 1
         model.train()
         with tqdm(train_loader, desc="training") as pbar:
             losses = []
