@@ -648,8 +648,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         )
                     )
     
-    if args.output_path and split_name=="valid":
-        with open("test_output_squire.txt", "w") as f:
+    if args.output_path and split_name=="test":
+        with open(os.path.join(args.save_dir,"test_output_squire.txt"), "w") as f:
             f.writelines(lines)
     metric_denominator = max(1, count)
     if preview_blocks:
