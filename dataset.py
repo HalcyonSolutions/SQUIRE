@@ -329,8 +329,6 @@ class Seq2SeqDataset(Dataset):
         max_len = max(lens)
         bsz = len(lens)
 
-        # input_ids = torch.LongTensor(bsz, self.max_q_len)
-        # attention_mask = torch.LongTensor(bsz, self.max_q_len)
         input_ids = torch.stack([s["input_ids"] for s in samples])
         attention_mask = torch.stack([s["attention_mask"] for s in samples])
 

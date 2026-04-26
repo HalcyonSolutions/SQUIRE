@@ -105,7 +105,6 @@ class TransformerModel(nn.Module):
         self.src_mask = None
         self.ninp = args.embedding_dim
         self.args = args
-        # self.pos_encoder = PositionalEncoding(self.ninp)
         self.pos_encoder = PositionalEncoding(self.ninp, max_seq_len=512)
         encoder_layers = nn.TransformerEncoderLayer(d_model=args.embedding_dim, nhead=4, dim_feedforward=args.hidden_size, dropout=args.dropout)
         self.enencoder = nn.TransformerEncoder(encoder_layers, args.num_layers)
@@ -186,7 +185,6 @@ class TransformerModel(nn.Module):
         bsz = prev_outputs.size(0)
         seq_len = prev_outputs.size(1)
         logits = self.logits(input_ids, attention_mask, prev_outputs)
-        # label-smoothing
         lprobs = F.log_softmax(logits, dim=-1)
         loss = -(self.label_smooth * torch.gather(input=lprobs, dim=-1, index=target.unsqueeze(-1)).squeeze() \
             + (1 - self.label_smooth) / (self.ntoken - 1) * lprobs.sum(dim=-1)) * mask

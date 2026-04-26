@@ -216,7 +216,6 @@ class Dictionary(object):
     def encode_line(
         self,
         line,
-        # line_tokenizer=tokenize_line,
         add_if_not_exist=False,
         consumer=None,
         append_eos=True,
@@ -226,7 +225,7 @@ class Dictionary(object):
         if reverse_order:
             words = list(reversed(words))
         nwords = len(words)
-        ids = torch.IntTensor(nwords + 1 if append_eos else nwords) #? random initialization?
+        ids = torch.IntTensor(nwords + 1 if append_eos else nwords) 
 
         for i, word in enumerate(words):
             if add_if_not_exist:

@@ -167,26 +167,6 @@ def format_generated_path(head_label, path_tokens, rev_dict, dataset, eos, bos):
 
     return " ".join(parts)
 
-def resolve_validation_split(dataset_path, question_file):
-    if not question_file:
-        return "test"
-    csv_file = os.path.join(dataset_path, question_file)
-    try:
-        split_labels = pd.read_csv(csv_file, usecols=["SplitLabel"])["SplitLabel"].dropna()
-    except (FileNotFoundError, ValueError, KeyError, pd.errors.EmptyDataError):
-        return "test"
-
-    # Prefer an explicit validation split when it exists, while keeping the
-    # previous test fallback for datasets that only ship train/test questions.
-    normalized = {}
-    for label in split_labels.astype(str):
-        clean_label = label.strip()
-        normalized[clean_label.lower()] = clean_label
-    if "dev" in normalized:
-        return normalized["dev"]
-    if "valid" in normalized:
-        return normalized["valid"]
-    return "test"
 
 def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos):
     row = None
@@ -307,7 +287,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         v = model.dictionary.indices[k]
         rev_dict[v] = k
 
-    # I'm aware that nested function making Code Smell
+    # I'm aware that nested function make Code Smell
     # For now they will stay here,
     # they help with debugging.
     # After I'm finished, I remove them.
@@ -383,7 +363,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 for i in range(debug_limit):
                     sample_id = samples["ids"][i].detach().cpu().tolist() if "ids" in samples else count + i
                     head_id = samples["head_id"][i].detach().cpu().tolist()
-                    # relation_id = samples["relation_id"][i].detach().cpu().tolist()
                     target_id = samples["target"][i].detach().cpu().view(-1)[0].tolist()
                     debug_blocks.append([
                         "================ SAMPLE =================",
@@ -391,36 +370,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         f"Sample ID: {sample_id}",
                         f"Question: {debug_question(sample_id)}",
                         f"Head ID: {debug_token(head_id)}",
-                        # f"Relation ID: {debug_token(relation_id)}",
                         f"Target ID: {debug_token(target_id)}",
                     ])
-
-            # if count < 5:
-            #     debug_prefix = torch.zeros([batch_size, 3], dtype=torch.long).to(device)
-            #     debug_prefix[:, 0] = model.dictionary.bos()
-            #     debug_prefix[:, 1] = samples["head_id"]
-            #     debug_prefix[:, 2] = samples["relation_id"]
-
-            #     debug_logits = model.logits(
-            #         samples["input_ids"],
-            #         samples["attention_mask"],
-            #         debug_prefix
-            #     )[:, -1, :]  # last position predicts entity
-
-            #     probs = F.softmax(debug_logits, dim=-1)
-            #     topk = torch.topk(probs, k=10, dim=-1)
-
-            #     for i in range(min(3, batch_size)):
-            #         gold = samples["target"][i].item()
-
-            #         sorted_ids = torch.argsort(probs[i], descending=True)
-            #         rank = (sorted_ids == gold).nonzero(as_tuple=False)
-            #         rank = rank.item() if rank.numel() > 0 else None
-
-            #         print("\n[LOGITS ENTITY DEBUG]")
-            #         print("Gold:", gold)
-            #         print("Top-10:", topk.indices[i].tolist())
-            #         print("Gold rank:", rank)
 
             candidates = [dict() for i in range(batch_size)]
             candidates_path = [dict() for i in range(batch_size)]
@@ -561,7 +512,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     candidates[i][candidate] += math.exp(prob)
                                 else:
                                     candidates[i][candidate] = max(candidates[i][candidate], prob)
-                # no <end> but reach max_len
+                # no </s> but reach max_len
                 if l == max_len-1:
                     for i in range(batch_size):
                         for j in range(beam_size*2):
@@ -597,7 +548,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             for i in range(batch_size):
                 debug_sample = count < 2 and i < debug_limit
                 hid = samples["head_id"][i].item()
-                # rid = samples["relation_id"][i].item()
+                
+                #! index is irrelevant for new kinship dataset
+                #! because it doesn't have Query-Relation information
                 # index = vocab_size * rid + hid
                 index = None
                 if debug_sample:
@@ -608,7 +561,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     ])
                     debug_blocks[i].extend(debug_candidate_lines(candidates[i]))
                     debug_blocks[i].append(f"Gold: {debug_token(debug_gold)}")
-                # if index in valid_triples:
+
                 if index is not None and index in valid_triples:
                     mask = valid_triples[index]
                     for tid in candidates[i].keys():
@@ -641,9 +594,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 question_text = get_row_text(row, "Question")
 
                 head_label = decode_token(hid, rev_dict, dataset)
-                # relation_label = decode_token(rid, rev_dict, dataset)
                 target_label = decode_token(target_id, rev_dict, dataset)
-                # path_token = f"{question_text}\t{head_label} | {relation_label} | {target_label}\t"
                 path_token = f"{question_text}\t{head_label} | {target_label}\t"
 
                 if ranking.nelement() != 0:
@@ -763,19 +714,13 @@ def train(args):
         "pin_memory": device == "cuda",
     }
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
-    valid_split = resolve_validation_split(args.dataset + "/", args.question_file)
-    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split=valid_split, args=args)
-    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", split="test", args=args)
+    valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split="dev", args=args)
     train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", split="train", args=args)
     train_valid, eval_valid = train_set.get_next_valid()
     train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True, **loader_kwargs)
-    valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, **loader_kwargs)
-    test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, **loader_kwargs)
-    train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False, **loader_kwargs)
-    # valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
-    # test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
-    # train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=False)
-    
+    valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=valid_set.collate_fn, shuffle=True, **loader_kwargs)
+    train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=valid_set.collate_fn, shuffle=False, **loader_kwargs)
+
     model = TransformerModel(args, train_set.dictionary).to(device)
     train_preview_rev_dict = build_rev_dict(train_set.dictionary)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -784,7 +729,8 @@ def train(args):
     warmup_steps = total_step_num / args.warmup
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, total_step_num)
     
-    # if args.iter:
+    #! iterative training isn't tested
+    # if args.iter: 
     #     iter_trainer = Iter_trainer(args.dataset, args.iter_batch_size, 32, 4)
     #     iter_epoch = []
     #     max_len = args.max_len
@@ -802,6 +748,7 @@ def train(args):
     #                 "[Iter0: %d] [Iter1: %d] [Iter2: %d]"
     #                 % (iter_epoch[0], iter_epoch[1], iter_epoch[2])
     #                 )
+
     best_hit1 = -float("inf")
     best_epoch = -1
     metric_history = {
@@ -817,6 +764,8 @@ def train(args):
     }
     steps = 0
     for epoch in range(args.num_epoch):
+
+        #! iterative training isn't tested
         # if args.iter:
         #     if curr_iter_epoch == 0: # start next iteration
         #         curr_iter += 1
@@ -836,6 +785,7 @@ def train(args):
         #             warmup_steps = 0
         #         scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, step_num)
         #     curr_iter_epoch -= 1
+
         model.train()
         with tqdm(train_loader, desc="training") as pbar:
             losses = []
@@ -971,9 +921,8 @@ def checkpoint(args):
         "num_workers": max(0, args.num_workers),
         "pin_memory": device == "cuda",
     }
-    train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, args=args)
-    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", args=args)
-    # test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True)
+    train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
+    test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", split="test", args=args)
     test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, **loader_kwargs)
     train_valid, eval_valid = train_set.get_next_valid()
     model = TransformerModel(args, train_set.dictionary)
