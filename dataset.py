@@ -52,6 +52,13 @@ def _reverse_relation_token(relation):
     return f"{relation}{DIRECT_REVERSE_SUFFIX}"
 
 
+def _normalize_label_text(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _iter_triple_file(path):
     if not os.path.exists(path):
         return
@@ -226,6 +233,67 @@ class Seq2SeqDataset(Dataset):
         self.entity2id = {}
         self.id2entity = {}
         if self.direct_id_mode:
+            self.relation2id = {}
+            self.id2relation = {}
+
+            def add_entity(token, label=None):
+                token = str(token)
+                if not _is_wikidata_entity(token):
+                    return
+                self.entity2id[token] = token
+                label_text = _normalize_label_text(label)
+                if label_text is not None:
+                    self.id2entity[token] = label_text
+                else:
+                    self.id2entity.setdefault(token, token)
+
+            def add_relation(token, label=None):
+                token = str(token)
+                if not _is_wikidata_relation(token):
+                    return
+                self.relation2id[token] = token
+                label_text = _normalize_label_text(label)
+                if label_text is not None:
+                    self.id2relation[token] = label_text
+                else:
+                    self.id2relation.setdefault(token, token)
+
+                rev_token = _reverse_relation_token(token)
+                self.relation2id.setdefault(rev_token, rev_token)
+                reverse_label = f"{self.id2relation[token]} (reverse)"
+                if label_text is not None:
+                    self.id2relation[rev_token] = reverse_label
+                else:
+                    self.id2relation.setdefault(rev_token, reverse_label)
+
+            for _, row in self.data.iterrows():
+                add_entity(row.get("Source-Entity"), row.get("Source"))
+                add_entity(row.get("Answer-Entity"), row.get("Answer"))
+
+                try:
+                    paths = _parse_paths_cell(row.get("Paths"))
+                except (ValueError, SyntaxError):
+                    paths = []
+                try:
+                    path_labels = _parse_paths_cell(row.get("Paths-Label"))
+                except (ValueError, SyntaxError):
+                    path_labels = []
+
+                if not isinstance(paths, list):
+                    continue
+                if not isinstance(path_labels, list):
+                    path_labels = []
+
+                for i, hop in enumerate(paths):
+                    if not isinstance(hop, (list, tuple)) or len(hop) < 3:
+                        continue
+                    label_hop = path_labels[i] if i < len(path_labels) else ()
+                    if not isinstance(label_hop, (list, tuple)):
+                        label_hop = ()
+                    add_entity(hop[0], label_hop[0] if len(label_hop) > 0 else None)
+                    add_relation(hop[1], label_hop[1] if len(label_hop) > 1 else None)
+                    add_entity(hop[2], label_hop[2] if len(label_hop) > 2 else None)
+
             for column in ("Source-Entity", "Answer-Entity"):
                 if column not in self.data.columns:
                     continue
@@ -237,8 +305,6 @@ class Seq2SeqDataset(Dataset):
                         self.entity2id[token] = token
                         self.id2entity.setdefault(token, token)
 
-            self.relation2id = {}
-            self.id2relation = {}
             if "Paths" in self.data.columns:
                 for value in self.data["Paths"]:
                     try:
@@ -257,7 +323,7 @@ class Seq2SeqDataset(Dataset):
                             self.id2relation.setdefault(token, token)
                             rev_token = _reverse_relation_token(token)
                             self.relation2id.setdefault(rev_token, rev_token)
-                            self.id2relation.setdefault(rev_token, f"{token} (reverse)")
+                            self.id2relation.setdefault(rev_token, f"{self.id2relation[token]} (reverse)")
             return
 
         with open(self.data_path + "entity2id.txt") as f:

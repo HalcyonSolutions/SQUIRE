@@ -107,6 +107,12 @@ def decode_token(token_id, rev_dict, dataset=None):
     symbol = safe_lookup(int(token_id), rev_dict)
     return decode_symbol(symbol, dataset)
 
+
+def is_relation_symbol(symbol, dataset=None):
+    if dataset is not None and hasattr(dataset, "id2relation") and symbol in dataset.id2relation:
+        return True
+    return isinstance(symbol, str) and symbol.startswith("R")
+
 def format_query_chain(row, relation_fallback):
     if row is None:
         return relation_fallback
@@ -118,7 +124,9 @@ def format_query_chain(row, relation_fallback):
 def format_gold_path(row):
     if row is None:
         return "N/A"
-    paths = parse_optional_literal(row.get("Paths"))
+    paths = parse_optional_literal(row.get("Paths-Label"))
+    if not isinstance(paths, list) or not paths:
+        paths = parse_optional_literal(row.get("Paths"))
     if not isinstance(paths, list) or not paths:
         return "N/A"
 
@@ -149,7 +157,7 @@ def format_generated_path(head_label, path_tokens, rev_dict, dataset, eos, bos):
 
         symbol = safe_lookup(token_id, rev_dict)
         label = decode_symbol(symbol, dataset)
-        if symbol.startswith("R"):
+        if is_relation_symbol(symbol, dataset):
             pending_relation = label
             continue
         if pending_relation is None:
@@ -173,9 +181,9 @@ def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, cand
     if dataset is not None and hasattr(dataset, "data"):
         row = dataset.data.iloc[int(sample_id)]
 
-    source_entity = get_row_text(row, "Source-Entity", decode_token(head_id, rev_dict, dataset))
+    source_entity = get_row_text(row, "Source", decode_token(head_id, rev_dict, dataset))
     relation_chain = format_query_chain(row, decode_token(relation_id, rev_dict, dataset))
-    gold_answer = get_row_text(row, "Answer-Entity", decode_token(target_id, rev_dict, dataset))
+    gold_answer = get_row_text(row, "Answer", decode_token(target_id, rev_dict, dataset))
     predicted_answer = decode_token(candidate_ids[0], rev_dict, dataset) if candidate_ids else "N/A"
     predicted_path = "N/A"
     if candidate_paths:
@@ -593,8 +601,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
                 question_text = get_row_text(row, "Question")
 
-                head_label = decode_token(hid, rev_dict, dataset)
-                target_label = decode_token(target_id, rev_dict, dataset)
+                head_label = get_row_text(row, "Source", decode_token(hid, rev_dict, dataset))
+                target_label = get_row_text(row, "Answer", decode_token(target_id, rev_dict, dataset))
                 path_token = f"{question_text}\t{head_label} | {target_label}\t"
 
                 if ranking.nelement() != 0:
