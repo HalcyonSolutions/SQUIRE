@@ -347,7 +347,11 @@ class Seq2SeqDataset(Dataset):
 
     def __getitem__(self, index):
         row = self.data.iloc[index]
-        question = str(row["Question"])
+        
+        if self.args.train_paraphrased:
+            question = str(row["Question-Paraphrased"])
+        else:
+            question = str(row["Question"])
 
         paths = _parse_paths_cell(row["Paths"])
         tgt_line = _flatten_path_hops(paths)
@@ -599,13 +603,17 @@ class TestDataset(Dataset):
         Seq2SeqDataset._load_mappings(self)
         self.padding_idx = self.dictionary.pad()
         self.len_vocab = len(self.dictionary)
+        self.args = args
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, index):
         row = self.data.iloc[index]
-        question = str(row["Question"])
+        if self.args.test_paraphrased:
+            question = str(row["Question-Paraphrased"])
+        else:
+            question = str(row["Question"])
         answer = str(row["Answer-Entity"])
         head = str(row["Source-Entity"])
         encoded_question = self.tokenizer(

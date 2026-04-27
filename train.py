@@ -63,6 +63,10 @@ def get_args():
     parser.add_argument("--train-preview-count", default=0, type=int, help="number of readable training examples to print per preview; set to 0 to disable")
     parser.add_argument("--train-preview-interval", default=100, type=int, help="print readable training preview every N optimizer steps when enabled")
     parser.add_argument("--train-preview-topk", default=5, type=int, help="number of top tokens to show for each previewed final answer position")
+    ###
+    parser.add_argument("--train-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for training.")
+    parser.add_argument("--test-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for testing.")
+
     args = parser.parse_args()
     return args
 
@@ -176,7 +180,7 @@ def format_generated_path(head_label, path_tokens, rev_dict, dataset, eos, bos):
     return " ".join(parts)
 
 
-def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos):
+def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos, test_paraphrased=False):
     row = None
     if dataset is not None and hasattr(dataset, "data"):
         row = dataset.data.iloc[int(sample_id)]
@@ -193,8 +197,12 @@ def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, cand
     rank_text = str(rank_idx + 1) if rank_idx is not None else "not ranked"
     status = "correct" if candidate_ids and candidate_ids[0] == target_id else "incorrect"
 
+    if test_paraphrased:
+        question_row_text = get_row_text(row, "Question-Paraphrased")
+    else:
+        question_row_text = get_row_text(row, "Question")
     lines = [
-        f"Question: {get_row_text(row, 'Question')}",
+        f"Question: {question_row_text}",
         f"Structured Input: source={source_entity} | relation chain={relation_chain}",
         f"Gold Answer: {gold_answer}",
         f"Predicted Answer: {predicted_answer} ({status}; gold rank={rank_text})",
@@ -236,7 +244,10 @@ def build_train_preview(samples, pred, logits, last_idx, dataset, rev_dict, args
     for i in range(preview_count):
         sample_id = int(samples["ids"][i].detach().cpu().item())
         row = dataset.data.iloc[sample_id] if dataset is not None and hasattr(dataset, "data") else None
-        question = get_row_text(row, "Question", "N/A")
+        if args.train_paraphrased:
+            question = get_row_text(row, "Question-Paraphrased", "N/A")
+        else:
+            question = get_row_text(row, "Question", "N/A")
         input_len = int(samples["attention_mask"][i].sum().detach().cpu().item())
         input_ids = samples["input_ids"][i, :input_len].detach().cpu().tolist()
         input_text = dataset.tokenizer.decode(input_ids, skip_special_tokens=True) if dataset is not None and hasattr(dataset, "tokenizer") else str(input_ids)
@@ -324,11 +335,14 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             return ["[]"]
         return [f"{debug_token(candidate_id)}: {score:.6f}" for candidate_id, score in items]
 
-    def debug_question(sample_id):
+    def debug_question(sample_id, test_paraphrased=False):
         if dataset is not None and hasattr(dataset, "data"):
             sample_id = int(sample_id)
             if 0 <= sample_id < len(dataset.data):
-                return get_row_text(dataset.data.iloc[sample_id], "Question")
+                if test_paraphrased:
+                    return get_row_text(dataset.data.iloc[sample_id], "Question-Paraphrased")
+                else:
+                    return get_row_text(dataset.data.iloc[sample_id], "Question")
         return "N/A"
 
     def debug_model_input_lines(input_ids_row, attention_mask_row, prefix_row):
@@ -376,7 +390,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         "================ SAMPLE =================",
                         "[INPUT]",
                         f"Sample ID: {sample_id}",
-                        f"Question: {debug_question(sample_id)}",
+                        f"Question: {debug_question(sample_id, test_paraphrased=args.test_paraphrased)}",
                         f"Head ID: {debug_token(head_id)}",
                         f"Target ID: {debug_token(target_id)}",
                     ])
@@ -599,7 +613,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 ranking = (candidate[:] == target_id).nonzero(as_tuple=False)
                 rank_idx = None
                 row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
-                question_text = get_row_text(row, "Question")
+                if args.test_paraphrased:
+                    question_text = get_row_text(row, "Question-Paraphrased")
+                else:
+                    question_text = get_row_text(row, "Question")
 
                 head_label = get_row_text(row, "Source", decode_token(hid, rev_dict, dataset))
                 target_label = get_row_text(row, "Answer", decode_token(target_id, rev_dict, dataset))
@@ -653,6 +670,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                             rev_dict=rev_dict,
                             eos=eos,
                             bos=bos,
+                            test_paraphrased=args.test_paraphrased
                         )
                     )
     
