@@ -138,6 +138,17 @@ def edit_distance(pred_seq: Sequence[int], gt_seq: Sequence[int]):
 
     return dp[m][n], None, None
 
+def answer_set_f1(predicted_endpoints, gold_answers, eps=1e-8):
+    pred_set = set(predicted_endpoints)
+    gold_set = set(gold_answers)
+
+    tp = len(pred_set & gold_set)
+    precision = tp / (len(pred_set) + eps)
+    recall = tp / (len(gold_set) + eps)
+    f1 = 2 * precision * recall / (precision + recall + eps)
+
+    return precision, recall, f1
+
 def get_row_text(row, key, default="N/A"):
 
     if row is None or key not in row:
@@ -436,7 +447,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     l_punish = args.l_punish
     max_len = 2 * args.max_len + 2
     restricted_punish = -30
-    mrr, hit, hit1, hit3, hit5, hit10, edge_f1, relation_edit_distance_sum, count = (0, 0, 0, 0, 0, 0, 0, 0, 0)
+    mrr, hit, hit1, hit3, hit5, hit10, edge_f1, relation_edit_distance_sum, answer_f1_sum, answer_p_sum, answer_r_sum, count = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     vocab_size = len(model.dictionary)
     eos = model.dictionary.eos()
     bos = model.dictionary.bos()
@@ -592,8 +603,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         for samples in pbar:
             samples = move_batch_to_device(samples, device)
             pbar.set_description(
-                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f, EdgeF1: %f, RelED: %f"
-                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), edge_f1/max(1, count), relation_edit_distance_sum/max(1, count))
+                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f, EdgeF1: %f, RelED: %f, AnswerF1: %f"
+                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), edge_f1/max(1, count), relation_edit_distance_sum/max(1, count), answer_f1_sum/max(1, count))
             )
             batch_size = samples["input_ids"].size(0)
             debug_limit = 0
@@ -835,6 +846,21 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 pred_relations = path_tokens_to_relations(candidate_path[0], eos, bos) if candidate_path else []
                 gt_edges = row_to_gt_edges(row)
                 gt_relations = row_to_gt_relations(row)
+                predicted_endpoints = candidate_ids
+                gold_answers = [target_id]
+                if row is not None:
+                    row_answers = parse_optional_literal(row.get("Answers"))
+                    if isinstance(row_answers, list) and row_answers:
+                        parsed_gold_answers = []
+                        for answer in row_answers:
+                            answer_id = row_path_token_to_id(answer, is_relation=False)
+                            if answer_id is not None:
+                                parsed_gold_answers.append(answer_id)
+                        gold_answers = parsed_gold_answers
+                answer_p, answer_r, answer_f1 = answer_set_f1(predicted_endpoints, gold_answers)
+                answer_f1_sum += answer_f1
+                answer_p_sum += answer_p
+                answer_r_sum += answer_r
                 if gt_edges:
                     _, _, sample_edge_f1 = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
                     edge_f1 += sample_edge_f1
@@ -912,7 +938,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             write_tqdm_block(block)
             if idx != len(preview_blocks):
                 tqdm.write("")
-    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f, RelED: %.6f" % (
+    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f, RelED: %.6f, AnswerF1: %.6f" % (
         split_name.upper(),
         mrr/metric_denominator,
         hit1/metric_denominator,
@@ -921,6 +947,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         hit10/metric_denominator,
         edge_f1/metric_denominator,
         relation_edit_distance_sum/metric_denominator,
+        answer_f1_sum/metric_denominator,
     )
     tqdm.write(summary)
     logging.info(summary)
@@ -1116,8 +1143,7 @@ def train(args):
         should_validate = args.validate_during_training and ((epoch + 1) % validate_interval == 0)
         if should_validate:
             with torch.no_grad():
-                # train_mrr, train_hit1, train_hit3, train_hit5, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
-                train_mrr, train_hit1, train_hit3, train_hit5, train_hit10 = 0,0,0,0,0
+                train_mrr, train_hit1, train_hit3, train_hit5, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
                 valid_mrr, valid_hit1, valid_hit3, valid_hit5, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
 
             metric_history["epoch"].append(epoch + 1)
