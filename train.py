@@ -66,6 +66,7 @@ def get_args():
     parser.add_argument("--train-preview-count", default=0, type=int, help="number of readable training examples to print per preview; set to 0 to disable")
     parser.add_argument("--train-preview-interval", default=100, type=int, help="print readable training preview every N optimizer steps when enabled")
     parser.add_argument("--train-preview-topk", default=5, type=int, help="number of top tokens to show for each previewed final answer position")
+    parser.add_argument("--answer-set-topk", default=1, type=int, help="number of top ranked endpoints used for AnswerF1")
     ###
     parser.add_argument("--train-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for training.")
     parser.add_argument("--test-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for testing.")
@@ -846,7 +847,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 pred_relations = path_tokens_to_relations(candidate_path[0], eos, bos) if candidate_path else []
                 gt_edges = row_to_gt_edges(row)
                 gt_relations = row_to_gt_relations(row)
-                predicted_endpoints = candidate_ids
+                answer_set_topk = max(1, args.answer_set_topk)
+                predicted_endpoints = candidate_ids[:answer_set_topk]
                 gold_answers = [target_id]
                 if row is not None:
                     row_answers = parse_optional_literal(row.get("Answers"))
