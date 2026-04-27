@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument("--answer-set-topk", default=1, type=int, help="number of top ranked endpoints used for AnswerF1")
     ###
     # train paraphrased isn't used
-    # parser.add_argument("--train-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for training.")
+    parser.add_argument("--train-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for training.")
     parser.add_argument("--test-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for testing.")
 
     args = parser.parse_args()
