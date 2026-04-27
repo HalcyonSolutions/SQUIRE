@@ -59,6 +59,52 @@ def _normalize_label_text(value):
     return text or None
 
 
+def _parse_paraphrased_questions(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+
+    parsed = value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            parsed = text
+
+    if isinstance(parsed, (list, tuple, set)):
+        questions = []
+        for question in parsed:
+            question_text = _normalize_label_text(question)
+            if question_text is not None:
+                questions.append(question_text)
+        return questions
+
+    question_text = _normalize_label_text(parsed)
+    return [question_text] if question_text is not None else []
+
+
+def _expand_test_paraphrased_rows(dataframe):
+    if "Question-Paraphrased" not in dataframe.columns:
+        return dataframe
+
+    expanded_rows = []
+    for _, row in dataframe.iterrows():
+        paraphrased_questions = _parse_paraphrased_questions(row.get("Question-Paraphrased"))
+        if not paraphrased_questions:
+            expanded_rows.append(row.copy())
+            continue
+        for question in paraphrased_questions:
+            expanded_row = row.copy()
+            expanded_row["Question-Paraphrased"] = repr([question])
+            expanded_rows.append(expanded_row)
+
+    if not expanded_rows:
+        return dataframe.iloc[0:0].copy()
+    return pd.DataFrame(expanded_rows).reset_index(drop=True)
+
+
 def _iter_triple_file(path):
     if not os.path.exists(path):
         return
@@ -586,6 +632,8 @@ class TestDataset(Dataset):
         self.data = pd.read_csv(self.csv_file)
         if split is not None:
             self.data = self.data[self.data["SplitLabel"] == split].reset_index(drop=True)
+        if getattr(args, "test_paraphrased", False):
+            self.data = _expand_test_paraphrased_rows(self.data)
         self.direct_id_mode = _infer_direct_id_mode(self.data)
         if Seq2SeqDataset._tokenizer is None:
             Seq2SeqDataset._tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
@@ -612,8 +660,8 @@ class TestDataset(Dataset):
     def __getitem__(self, index):
         row = self.data.iloc[index]
         if self.args.test_paraphrased:
-            set_question = str(row["Question-Paraphrased"])
-            question = ast.literal_eval(set_question)[-1]
+            paraphrased_questions = _parse_paraphrased_questions(row.get("Question-Paraphrased"))
+            question = paraphrased_questions[0] if paraphrased_questions else str(row["Question"])
         else:
             question = str(row["Question"])
         answer = str(row["Answer-Entity"])

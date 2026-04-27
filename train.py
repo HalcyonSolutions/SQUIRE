@@ -96,7 +96,7 @@ def get_row_text(row, key, default="N/A"):
     if value is None:
         return default
 
-    if key is "Question-Paraphrased":
+    if key == "Question-Paraphrased":
         value = ast.literal_eval(str(value))[-1]
 
     if isinstance(value, float) and math.isnan(value):
