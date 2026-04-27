@@ -17,6 +17,7 @@ import pandas as pd
 from iterative_training import Iter_trainer
 import math
 import matplotlib
+from typing import Set, Tuple, Sequence, Dict
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -187,6 +188,62 @@ def format_generated_path(head_label, path_tokens, rev_dict, dataset, eos, bos):
 
     return " ".join(parts)
 
+def compute_precision_recall_f1(
+    pred: Set,
+    gt: Set,
+    eps: float = 1e-8,
+) -> Tuple[float, float, float]:
+    tp = len(pred & gt)
+    fp = len(pred - gt)
+    fn = len(gt - pred)
+
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    f1 = 2 * precision * recall / (precision + recall + eps)
+    return precision, recall, f1
+
+def gt_edge_overlap_f1(
+    pred_path: Sequence[Tuple[int, int, int]],
+    gt_path: Sequence[Tuple[int, int, int]],
+    special_tokens: Set[int],
+    inverse_mapping: Dict[int, int],
+) -> Tuple[float, float, float]:
+    """
+    Permutation-invariant edge overlap between predicted and gold paths.
+
+    Mirrors the repo behavior:
+    - remove special tokens such as NO_OP / STOP / RESTART
+    - canonicalize inverse edges back into forward edges
+    - compare edge sets
+    """
+    pred_edges = {
+        canon_edge(h, r, t, inverse_mapping)
+        for h, r, t in pred_path
+        if r not in special_tokens
+    }
+    gt_edges = {(h, r, t) for h, r, t in gt_path}
+    return compute_precision_recall_f1(pred_edges, gt_edges)
+
+def canon_edge(h: int, r: int, t: int, inverse_mapping: Dict[int, int]) -> Tuple[int, int, int]:
+    if r in inverse_mapping:
+        return (t, inverse_mapping[r], h)
+    return (h, r, t)
+
+def path_tokens_to_edges(path_tokens, eos, bos):
+    clean = []
+    for token in path_tokens:
+        token = int(token)
+        if token == eos:
+            break
+        if token == bos:
+            continue
+        clean.append(token)
+
+    edges = []
+    for idx in range(0, len(clean) - 2, 2):
+        edges.append((clean[idx], clean[idx + 1], clean[idx + 2]))
+
+    return edges
 
 def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos, test_paraphrased=False):
     row = None
@@ -320,7 +377,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     l_punish = args.l_punish
     max_len = 2 * args.max_len + 2
     restricted_punish = -30
-    mrr, hit, hit1, hit3, hit5, hit10, count = (0, 0, 0, 0, 0, 0, 0)
+    mrr, hit, hit1, hit3, hit5, hit10, edge_f1, count = (0, 0, 0, 0, 0, 0, 0, 0)
     vocab_size = len(model.dictionary)
     eos = model.dictionary.eos()
     bos = model.dictionary.bos()
@@ -334,6 +391,21 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     for k in model.dictionary.indices.keys():
         v = model.dictionary.indices[k]
         rev_dict[v] = k
+    special_tokens = {bos, eos, model.dictionary.pad()}
+    loop_token = model.dictionary.indices.get("LOOP")
+    if loop_token is not None:
+        special_tokens.add(loop_token)
+    inverse_mapping = {}
+    relation_name_to_id = {}
+    if dataset is not None and hasattr(dataset, "id2relation"):
+        for token_id, symbol in rev_dict.items():
+            if symbol in dataset.id2relation:
+                relation_name_to_id[dataset.id2relation[symbol]] = token_id
+        for relation_name, token_id in relation_name_to_id.items():
+            if relation_name.endswith(" (reverse)"):
+                base_name = relation_name[: -len(" (reverse)")]
+                if base_name in relation_name_to_id:
+                    inverse_mapping[token_id] = relation_name_to_id[base_name]
 
     # I'm aware that nested function make Code Smell
     # For now they will stay here,
@@ -399,12 +471,51 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     def slot_role(prefix_idx):
         return "HEAD/ENTITY" if prefix_idx % 2 == 1 else "RELATION/EOS"
 
+    def row_path_token_to_id(token, is_relation):
+        token = str(token)
+        if token in model.dictionary.indices:
+            return model.dictionary.indices[token]
+        if dataset is None:
+            return None
+        if is_relation and hasattr(dataset, "relation2id") and token in dataset.relation2id:
+            mapped = dataset.relation2id[token]
+            return model.dictionary.indices.get(mapped)
+        if (not is_relation) and hasattr(dataset, "entity2id") and token in dataset.entity2id:
+            mapped = dataset.entity2id[token]
+            return model.dictionary.indices.get(mapped)
+        return None
+
+    def row_to_gt_edges(row):
+        if row is None:
+            return []
+        gt_paths = parse_optional_literal(row.get("Paths"))
+        if not isinstance(gt_paths, list) or not gt_paths:
+            gt_paths = parse_optional_literal(row.get("Paths-Label"))
+        if not isinstance(gt_paths, list) or not gt_paths:
+            return []
+
+        gt_path_tokens = [bos]
+        for hop_idx, hop in enumerate(gt_paths):
+            if not isinstance(hop, (list, tuple)) or len(hop) < 3:
+                continue
+            h_id = row_path_token_to_id(hop[0], is_relation=False)
+            r_id = row_path_token_to_id(hop[1], is_relation=True)
+            t_id = row_path_token_to_id(hop[2], is_relation=False)
+            if h_id is None or r_id is None or t_id is None:
+                continue
+            if hop_idx == 0:
+                gt_path_tokens.extend([h_id, r_id, t_id])
+            else:
+                gt_path_tokens.extend([r_id, t_id])
+        gt_path_tokens.append(eos)
+        return path_tokens_to_edges(gt_path_tokens, eos, bos)
+
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
             samples = move_batch_to_device(samples, device)
             pbar.set_description(
-                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f"
-                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count))
+                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f, EdgeF1: %f"
+                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), edge_f1/max(1, count))
             )
             batch_size = samples["input_ids"].size(0)
             debug_limit = 0
@@ -642,6 +753,15 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 ranking = (candidate[:] == target_id).nonzero(as_tuple=False)
                 rank_idx = None
                 row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
+                pred_edges = path_tokens_to_edges(candidate_path[0], eos, bos) if candidate_path else []
+                gt_edges = row_to_gt_edges(row)
+                # print(pred_edges)
+                # print(f"-===============================================-")
+                # print(gt_edges)
+                # exit()
+                if gt_edges:
+                    _, _, sample_edge_f1 = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
+                    edge_f1 += sample_edge_f1
                 if args.test_paraphrased:
                     question_text = get_row_text(row, "Question-Paraphrased")
                 else:
@@ -715,13 +835,14 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             write_tqdm_block(block)
             if idx != len(preview_blocks):
                 tqdm.write("")
-    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f" % (
+    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f" % (
         split_name.upper(),
         mrr/metric_denominator,
         hit1/metric_denominator,
         hit3/metric_denominator,
         hit5/metric_denominator,
         hit10/metric_denominator,
+        edge_f1/metric_denominator,
     )
     tqdm.write(summary)
     logging.info(summary)
