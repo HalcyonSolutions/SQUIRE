@@ -89,13 +89,19 @@ def parse_optional_literal(value):
     return value
 
 def get_row_text(row, key, default="N/A"):
+
     if row is None or key not in row:
         return default
     value = row[key]
     if value is None:
         return default
+
+    if key is "Question-Paraphrased":
+        value = ast.literal_eval(str(value))[-1]
+
     if isinstance(value, float) and math.isnan(value):
         return default
+
     text = str(value).strip()
     return text if text else default
 

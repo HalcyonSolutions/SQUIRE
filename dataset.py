@@ -349,7 +349,8 @@ class Seq2SeqDataset(Dataset):
         row = self.data.iloc[index]
         
         if self.args.train_paraphrased:
-            question = str(row["Question-Paraphrased"])
+            set_question = str(row["Question-Paraphrased"])
+            question = ast.literal_eval(set_question)[-1]
         else:
             question = str(row["Question"])
 
@@ -611,7 +612,8 @@ class TestDataset(Dataset):
     def __getitem__(self, index):
         row = self.data.iloc[index]
         if self.args.test_paraphrased:
-            question = str(row["Question-Paraphrased"])
+            set_question = str(row["Question-Paraphrased"])
+            question = ast.literal_eval(set_question)[-1]
         else:
             question = str(row["Question"])
         answer = str(row["Answer-Entity"])
