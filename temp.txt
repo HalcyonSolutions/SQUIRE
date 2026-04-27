@@ -1,0 +1,162 @@
+diff --git a/train.py b/train.py
+index a7e708c..0b1ade4 100644
+--- a/train.py
++++ b/train.py
+@@ -91,6 +91,53 @@ def parse_optional_literal(value):
+             return text
+     return value
+ 
++def relation_edit_distance(
++    pred_relations: Sequence[int],
++    gt_relations: Sequence[int],
++    special_tokens: Set[int],
++    inverse_mapping: Dict[int, int],
++) -> int:
++    """
++    Raw relation-sequence edit distance.
++
++    - removes special relation tokens
++    - canonicalizes inverse relation tokens
++    - computes Levenshtein distance
++    - does NOT normalize
++    """
++    pred_rels = [
++        canon_rel(r, inverse_mapping)
++        for r in pred_relations
++        if r not in special_tokens
++    ]
++    gt_rels = list(gt_relations)
++
++    dist, _, _ = edit_distance(pred_rels, gt_rels)
++    return dist
++
++def canon_rel(r: int, inverse_mapping: Dict[int, int]) -> int:
++    return inverse_mapping.get(r, r)
++
++def edit_distance(pred_seq: Sequence[int], gt_seq: Sequence[int]):
++    m, n = len(pred_seq), len(gt_seq)
++    dp = [[0] * (n + 1) for _ in range(m + 1)]
++
++    for i in range(m + 1):
++        dp[i][0] = i
++    for j in range(n + 1):
++        dp[0][j] = j
++
++    for i in range(1, m + 1):
++        for j in range(1, n + 1):
++            cost = 0 if pred_seq[i - 1] == gt_seq[j - 1] else 1
++            dp[i][j] = min(
++                dp[i - 1][j] + 1,
++                dp[i][j - 1] + 1,
++                dp[i - 1][j - 1] + cost,
++            )
++
++    return dp[m][n], None, None
++
+ def get_row_text(row, key, default="N/A"):
+ 
+     if row is None or key not in row:
+@@ -245,6 +292,18 @@ def path_tokens_to_edges(path_tokens, eos, bos):
+ 
+     return edges
+ 
++def path_tokens_to_relations(path_tokens, eos, bos):
++    clean = []
++    for token in path_tokens:
++        token = int(token)
++        if token == eos:
++            break
++        if token == bos:
++            continue
++        clean.append(token)
++
++    return [clean[idx] for idx in range(1, len(clean), 2)]
++
+ def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos, test_paraphrased=False):
+     row = None
+     if dataset is not None and hasattr(dataset, "data"):
+@@ -377,7 +436,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
+     l_punish = args.l_punish
+     max_len = 2 * args.max_len + 2
+     restricted_punish = -30
+-    mrr, hit, hit1, hit3, hit5, hit10, edge_f1, count = (0, 0, 0, 0, 0, 0, 0, 0)
++    mrr, hit, hit1, hit3, hit5, hit10, edge_f1, relation_edit_distance_sum, count = (0, 0, 0, 0, 0, 0, 0, 0, 0)
+     vocab_size = len(model.dictionary)
+     eos = model.dictionary.eos()
+     bos = model.dictionary.bos()
+@@ -477,6 +536,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
+             return model.dictionary.indices[token]
+         if dataset is None:
+             return None
++        if is_relation and token in relation_name_to_id:
++            return relation_name_to_id[token]
+         if is_relation and hasattr(dataset, "relation2id") and token in dataset.relation2id:
+             mapped = dataset.relation2id[token]
+             return model.dictionary.indices.get(mapped)
+@@ -510,12 +571,29 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
+         gt_path_tokens.append(eos)
+         return path_tokens_to_edges(gt_path_tokens, eos, bos)
+ 
++    def row_to_gt_relations(row):
++        if row is None:
++            return []
++        gt_relations = parse_optional_literal(row.get("Query-Relations"))
++        if isinstance(gt_relations, list) and gt_relations:
++            relation_ids = []
++            for relation in gt_relations:
++                relation_id = row_path_token_to_id(relation, is_relation=True)
++                if relation_id is not None:
++                    relation_ids.append(relation_id)
++            return relation_ids
++        gt_relation = row.get("Query-Relation")
++        if gt_relation is None or (isinstance(gt_relation, float) and math.isnan(gt_relation)):
++            return []
++        relation_id = row_path_token_to_id(gt_relation, is_relation=True)
++        return [relation_id] if relation_id is not None else []
++
+     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
+         for samples in pbar:
+             samples = move_batch_to_device(samples, device)
+             pbar.set_description(
+-                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f, EdgeF1: %f"
+-                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), edge_f1/max(1, count))
++                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f, EdgeF1: %f, RelED: %f"
++                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), edge_f1/max(1, count), relation_edit_distance_sum/max(1, count))
+             )
+             batch_size = samples["input_ids"].size(0)
+             debug_limit = 0
+@@ -754,14 +832,13 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
+                 rank_idx = None
+                 row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
+                 pred_edges = path_tokens_to_edges(candidate_path[0], eos, bos) if candidate_path else []
++                pred_relations = path_tokens_to_relations(candidate_path[0], eos, bos) if candidate_path else []
+                 gt_edges = row_to_gt_edges(row)
+-                # print(pred_edges)
+-                # print(f"-===============================================-")
+-                # print(gt_edges)
+-                # exit()
++                gt_relations = row_to_gt_relations(row)
+                 if gt_edges:
+                     _, _, sample_edge_f1 = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
+                     edge_f1 += sample_edge_f1
++                relation_edit_distance_sum += relation_edit_distance(pred_relations, gt_relations, special_tokens, inverse_mapping)
+                 if args.test_paraphrased:
+                     question_text = get_row_text(row, "Question-Paraphrased")
+                 else:
+@@ -835,7 +912,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
+             write_tqdm_block(block)
+             if idx != len(preview_blocks):
+                 tqdm.write("")
+-    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f" % (
++    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f, RelED: %.6f" % (
+         split_name.upper(),
+         mrr/metric_denominator,
+         hit1/metric_denominator,
+@@ -843,6 +920,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
+         hit5/metric_denominator,
+         hit10/metric_denominator,
+         edge_f1/metric_denominator,
++        relation_edit_distance_sum/metric_denominator,
+     )
+     tqdm.write(summary)
+     logging.info(summary)
