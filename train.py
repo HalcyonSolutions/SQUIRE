@@ -297,7 +297,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     l_punish = args.l_punish
     max_len = 2 * args.max_len + 2
     restricted_punish = -30
-    mrr, hit, hit1, hit3, hit10, count = (0, 0, 0, 0, 0, 0)
+    mrr, hit, hit1, hit3, hit5, hit10, count = (0, 0, 0, 0, 0, 0, 0)
     vocab_size = len(model.dictionary)
     eos = model.dictionary.eos()
     bos = model.dictionary.bos()
@@ -380,8 +380,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         for samples in pbar:
             samples = move_batch_to_device(samples, device)
             pbar.set_description(
-                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@10: %f"
-                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit10/max(1, count))
+                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f"
+                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count))
             )
             batch_size = samples["input_ids"].size(0)
             debug_limit = 0
@@ -640,6 +640,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         hit1 += 1
                     if ranking_value <= 3:
                         hit3 += 1
+                    if ranking_value <= 5:
+                        hit5 += 1
                     if ranking_value <= 10:
                         hit10 += 1
                 else:
@@ -690,25 +692,27 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             write_tqdm_block(block)
             if idx != len(preview_blocks):
                 tqdm.write("")
-    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@10: %.6f" % (
+    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f" % (
         split_name.upper(),
         mrr/metric_denominator,
         hit1/metric_denominator,
         hit3/metric_denominator,
+        hit5/metric_denominator,
         hit10/metric_denominator,
     )
     tqdm.write(summary)
     logging.info(summary)
-    return mrr/metric_denominator, hit1/metric_denominator, hit3/metric_denominator, hit10/metric_denominator
+    return mrr/metric_denominator, hit1/metric_denominator, hit3/metric_denominator, hit5/metric_denominator, hit10/metric_denominator
 
 
 def plot_epoch_metrics(metric_history, save_dir):
     epochs = metric_history["epoch"]
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+    fig, axes = plt.subplots(3, 2, figsize=(12, 12), sharex=True)
     metric_specs = [
         ("mrr", "MRR"),
         ("hit1", "Hit@1"),
         ("hit3", "Hit@3"),
+        ("hit5", "Hit@5"),
         ("hit10", "Hit@10"),
     ]
 
@@ -720,6 +724,9 @@ def plot_epoch_metrics(metric_history, save_dir):
         ax.set_ylabel("Score")
         ax.grid(True, alpha=0.3)
         ax.legend()
+
+    for ax in axes.flat[len(metric_specs):]:
+        ax.axis("off")
 
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "training_metrics.png"), dpi=200)
@@ -791,6 +798,8 @@ def train(args):
         "valid_hit1": [],
         "train_hit3": [],
         "valid_hit3": [],
+        "train_hit5": [],
+        "valid_hit5": [],
         "train_hit10": [],
         "valid_hit10": [],
     }
@@ -884,8 +893,8 @@ def train(args):
         should_validate = args.validate_during_training and ((epoch + 1) % validate_interval == 0)
         if should_validate:
             with torch.no_grad():
-                train_mrr, train_hit1, train_hit3, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
-                valid_mrr, valid_hit1, valid_hit3, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
+                train_mrr, train_hit1, train_hit3, train_hit5, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
+                valid_mrr, valid_hit1, valid_hit3, valid_hit5, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
 
             metric_history["epoch"].append(epoch + 1)
             metric_history["train_mrr"].append(train_mrr)
@@ -894,20 +903,24 @@ def train(args):
             metric_history["valid_hit1"].append(valid_hit1)
             metric_history["train_hit3"].append(train_hit3)
             metric_history["valid_hit3"].append(valid_hit3)
+            metric_history["train_hit5"].append(train_hit5)
+            metric_history["valid_hit5"].append(valid_hit5)
             metric_history["train_hit10"].append(train_hit10)
             metric_history["valid_hit10"].append(valid_hit10)
 
             logging.info(
-                "[Epoch %d Metrics] [Train MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f] "
-                "[Valid MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@10: %.6f]",
+                "[Epoch %d Metrics] [Train MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@5: %.6f Hit@10: %.6f] "
+                "[Valid MRR: %.6f Hit@1: %.6f Hit@3: %.6f Hit@5: %.6f Hit@10: %.6f]",
                 epoch + 1,
                 train_mrr,
                 train_hit1,
                 train_hit3,
+                train_hit5,
                 train_hit10,
                 valid_mrr,
                 valid_hit1,
                 valid_hit3,
+                valid_hit5,
                 valid_hit10,
             )
 
