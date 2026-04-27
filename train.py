@@ -459,6 +459,20 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     preview_limit = max(0, getattr(args, "eval_preview_count", 0))
     preview_topk = max(1, getattr(args, "eval_preview_topk", 1))
     split_label = split_name.title()
+    hop_metrics = {
+        hop: {
+            "count": 0,
+            "mrr": 0,
+            "hit1": 0,
+            "hit3": 0,
+            "hit5": 0,
+            "hit10": 0,
+            "edge_f1": 0,
+            "relation_edit_distance": 0,
+            "answer_f1": 0,
+        }
+        for hop in (2, 3, 4)
+    }
     for k in model.dictionary.indices.keys():
         v = model.dictionary.indices[k]
         rev_dict[v] = k
@@ -599,6 +613,29 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             return []
         relation_id = row_path_token_to_id(gt_relation, is_relation=True)
         return [relation_id] if relation_id is not None else []
+
+    def row_to_hop_count(row):
+        if row is None:
+            return None
+        for column_name in ("Hops", "Num-Hops", "N-Hop", "hop", "num_hops"):
+            if column_name not in row.index:
+                continue
+            hop_value = row.get(column_name)
+            if hop_value is None or (isinstance(hop_value, float) and math.isnan(hop_value)):
+                continue
+            if isinstance(hop_value, (int, np.integer)):
+                return int(hop_value)
+            if isinstance(hop_value, float):
+                return int(hop_value)
+            hop_digits = "".join(ch for ch in str(hop_value) if ch.isdigit())
+            if hop_digits:
+                return int(hop_digits)
+        gt_paths = parse_optional_literal(row.get("Paths"))
+        if not isinstance(gt_paths, list) or not gt_paths:
+            gt_paths = parse_optional_literal(row.get("Paths-Label"))
+        if isinstance(gt_paths, list) and gt_paths:
+            return len(gt_paths)
+        return None
 
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
@@ -843,6 +880,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 ranking = (candidate[:] == target_id).nonzero(as_tuple=False)
                 rank_idx = None
                 row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
+                hop_count = row_to_hop_count(row)
                 pred_edges = path_tokens_to_edges(candidate_path[0], eos, bos) if candidate_path else []
                 pred_relations = path_tokens_to_relations(candidate_path[0], eos, bos) if candidate_path else []
                 gt_edges = row_to_gt_edges(row)
@@ -863,10 +901,12 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 answer_f1_sum += answer_f1
                 answer_p_sum += answer_p
                 answer_r_sum += answer_r
+                sample_edge_f1 = 0.0
                 if gt_edges:
                     _, _, sample_edge_f1 = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
                     edge_f1 += sample_edge_f1
-                relation_edit_distance_sum += relation_edit_distance(pred_relations, gt_relations, special_tokens, inverse_mapping)
+                sample_relation_edit_distance = relation_edit_distance(pred_relations, gt_relations, special_tokens, inverse_mapping)
+                relation_edit_distance_sum += sample_relation_edit_distance
                 if args.test_paraphrased:
                     question_text = get_row_text(row, "Question-Paraphrased")
                 else:
@@ -875,6 +915,11 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 head_label = get_row_text(row, "Source", decode_token(hid, rev_dict, dataset))
                 target_label = get_row_text(row, "Answer", decode_token(target_id, rev_dict, dataset))
                 path_token = f"{question_text}\t{head_label} | {target_label}\t"
+                sample_mrr = 0.0
+                sample_hit1 = 0
+                sample_hit3 = 0
+                sample_hit5 = 0
+                sample_hit10 = 0
 
                 if ranking.nelement() != 0:
                     rank_idx = ranking[0].item()
@@ -882,18 +927,34 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     path_token += format_generated_path(head_label, path, rev_dict, dataset, eos, bos) + '\t'
                     path_token += str(rank_idx)
                     ranking_value = 1 + rank_idx
-                    mrr += (1 / ranking_value)
+                    sample_mrr = 1 / ranking_value
+                    mrr += sample_mrr
                     hit += 1
                     if ranking_value <= 1:
                         hit1 += 1
+                        sample_hit1 = 1
                     if ranking_value <= 3:
                         hit3 += 1
+                        sample_hit3 = 1
                     if ranking_value <= 5:
                         hit5 += 1
+                        sample_hit5 = 1
                     if ranking_value <= 10:
                         hit10 += 1
+                        sample_hit10 = 1
                 else:
                     path_token += "wrong"
+                if hop_count in hop_metrics:
+                    hop_metric = hop_metrics[hop_count]
+                    hop_metric["count"] += 1
+                    hop_metric["mrr"] += sample_mrr
+                    hop_metric["hit1"] += sample_hit1
+                    hop_metric["hit3"] += sample_hit3
+                    hop_metric["hit5"] += sample_hit5
+                    hop_metric["hit10"] += sample_hit10
+                    hop_metric["edge_f1"] += sample_edge_f1
+                    hop_metric["relation_edit_distance"] += sample_relation_edit_distance
+                    hop_metric["answer_f1"] += answer_f1
                 lines.append(path_token+'\n')
                 if debug_sample:
                     rank_text = rank_idx + 1 if rank_idx is not None else None
@@ -953,6 +1014,25 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     )
     tqdm.write(summary)
     logging.info(summary)
+    for hop in (2, 3, 4):
+        hop_metric = hop_metrics[hop]
+        if hop_metric["count"] == 0:
+            continue
+        hop_denominator = hop_metric["count"]
+        hop_summary = "[%s %d-hop] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f, RelED: %.6f, AnswerF1: %.6f" % (
+            split_name.upper(),
+            hop,
+            hop_metric["mrr"] / hop_denominator,
+            hop_metric["hit1"] / hop_denominator,
+            hop_metric["hit3"] / hop_denominator,
+            hop_metric["hit5"] / hop_denominator,
+            hop_metric["hit10"] / hop_denominator,
+            hop_metric["edge_f1"] / hop_denominator,
+            hop_metric["relation_edit_distance"] / hop_denominator,
+            hop_metric["answer_f1"] / hop_denominator,
+        )
+        tqdm.write(hop_summary)
+        logging.info(hop_summary)
     return mrr/metric_denominator, hit1/metric_denominator, hit3/metric_denominator, hit5/metric_denominator, hit10/metric_denominator
 
 
