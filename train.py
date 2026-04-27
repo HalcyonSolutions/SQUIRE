@@ -8,6 +8,7 @@ from model import TransformerModel
 import argparse
 import numpy as np
 import os
+import random
 from tqdm import tqdm
 import logging
 import ast
@@ -35,6 +36,7 @@ def get_args():
     parser.add_argument("--save-dir", default="model_1")
     parser.add_argument("--ckpt", default="ckpt_30.pt")
     parser.add_argument("--dataset", default="FB15K237")
+    parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--label-smooth", default=0.5, type=float)
     parser.add_argument("--l-punish", default=False, action="store_true") # during generation, add punishment for length
     parser.add_argument("--beam-size", default=128, type=int) # during generation, beam size
@@ -281,6 +283,27 @@ def build_train_preview(samples, pred, logits, last_idx, dataset, rev_dict, args
 def write_tqdm_block(block):
     for line in block.splitlines():
         tqdm.write(line)
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+def build_dataloader_generator(seed):
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
 
 def move_batch_to_device(batch, device):
     moved = {}
@@ -751,14 +774,15 @@ def train(args):
     loader_kwargs = {
         "num_workers": max(0, args.num_workers),
         "pin_memory": device == "cuda",
+        "worker_init_fn": seed_worker,
     }
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
     valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split="dev", args=args)
     train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", split="train", args=args)
     train_valid, eval_valid = train_set.get_next_valid()
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True, **loader_kwargs)
-    valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=valid_set.collate_fn, shuffle=True, **loader_kwargs)
-    train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=valid_set.collate_fn, shuffle=False, **loader_kwargs)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True, generator=build_dataloader_generator(args.seed), **loader_kwargs)
+    valid_loader = DataLoader(valid_set, batch_size=args.test_batch_size, collate_fn=valid_set.collate_fn, shuffle=True, generator=build_dataloader_generator(args.seed + 1), **loader_kwargs)
+    train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=valid_set.collate_fn, shuffle=False, generator=build_dataloader_generator(args.seed + 2), **loader_kwargs)
 
     model = TransformerModel(args, train_set.dictionary).to(device)
     train_preview_rev_dict = build_rev_dict(train_set.dictionary)
@@ -893,7 +917,8 @@ def train(args):
         should_validate = args.validate_during_training and ((epoch + 1) % validate_interval == 0)
         if should_validate:
             with torch.no_grad():
-                train_mrr, train_hit1, train_hit3, train_hit5, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
+                # train_mrr, train_hit1, train_hit3, train_hit5, train_hit10 = evaluate(model, train_eval_loader, device, args, train_valid, eval_valid, split_name="train")
+                train_mrr, train_hit1, train_hit3, train_hit5, train_hit10 = 0,0,0,0,0
                 valid_mrr, valid_hit1, valid_hit3, valid_hit5, valid_hit10 = evaluate(model, valid_loader, device, args, train_valid, eval_valid, split_name="valid")
 
             metric_history["epoch"].append(epoch + 1)
@@ -965,10 +990,11 @@ def checkpoint(args):
     loader_kwargs = {
         "num_workers": max(0, args.num_workers),
         "pin_memory": device == "cuda",
+        "worker_init_fn": seed_worker,
     }
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
     test_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="test_triples.txt", split="test", args=args)
-    test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, **loader_kwargs)
+    test_loader = DataLoader(test_set, batch_size=args.test_batch_size, collate_fn=test_set.collate_fn, shuffle=True, generator=build_dataloader_generator(args.seed + 3), **loader_kwargs)
     train_valid, eval_valid = train_set.get_next_valid()
     model = TransformerModel(args, train_set.dictionary)
     model.load_state_dict(torch.load(os.path.join(ckpt_path, args.ckpt)))
@@ -980,6 +1006,7 @@ def checkpoint(args):
 
 if __name__ == "__main__":
     args = get_args()
+    set_seed(args.seed)
     if args.test:
         checkpoint(args)
     else:
