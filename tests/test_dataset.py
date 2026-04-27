@@ -11,6 +11,8 @@ class Args:
     max_q_len = 32
     question_file = "kinship_hinton_qa_nhop.csv"
     verbose = True
+    test_paraphrased = True
+    train_paraphrased = True
 
 
 def test_seq2seq_dataset():
@@ -40,7 +42,10 @@ def test_seq2seq_dataset():
         sample = dataset[idx]
         row = dataset.data.iloc[idx]
         paths = ast.literal_eval(row["Paths"])
-        true_question = row["Question"].lower()
+        if args.train_paraphrased:
+            true_question = str(row["Question-Paraphrased"]).lower()
+        else:
+            true_question = row["Question"].lower()
         hops = len(paths)
 
         # 2*num_hops + 1 = path length
@@ -122,7 +127,10 @@ def test_test_dataset():
     for idx in idx_array:
         sample = dataset[idx]
         row = dataset.data.iloc[idx]
-        true_question = str(row["Question"]).strip().lower()
+        if args.test_paraphrased:
+            true_question = str(row["Question-Paraphrased"]).strip().lower()
+        else:
+            true_question = str(row["Question"]).strip().lower()
 
         assert "input_ids" in sample
         assert "attention_mask" in sample

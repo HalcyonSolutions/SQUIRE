@@ -8,6 +8,7 @@ class Args:
     smart_filter = False
     max_q_len = 32
     question_file = "qa_nhop.csv"
+    train_paraphrased = True
 
 
 def build_mquake_dataset():
@@ -32,9 +33,12 @@ def test_direct_id_mappings_use_human_readable_labels():
 
 
 def test_generated_path_formats_full_direct_id_hops():
+    args = Args()
     dataset = build_mquake_dataset()
+    
+    column = "Question-Paraphrased" if args.train_paraphrased else "Question"
     row = dataset.data[
-        dataset.data["Question"]
+        dataset.data[column]
         == "Which continent is the country in, where the founder of Church of Sweden is a citizen?"
     ].iloc[0]
 
