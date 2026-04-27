@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 from dataset import Seq2SeqDataset, TestDataset
 from model import TransformerModel
 import argparse
+import csv
+import json
 import numpy as np
 import os
 import random
@@ -68,7 +70,8 @@ def get_args():
     parser.add_argument("--train-preview-topk", default=5, type=int, help="number of top tokens to show for each previewed final answer position")
     parser.add_argument("--answer-set-topk", default=1, type=int, help="number of top ranked endpoints used for AnswerF1")
     ###
-    parser.add_argument("--train-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for training.")
+    # train paraphrased isn't used
+    # parser.add_argument("--train-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for training.")
     parser.add_argument("--test-paraphrased", default=False, action="store_true", help="Use Paraphrased questions for testing.")
 
     args = parser.parse_args()
@@ -1036,6 +1039,26 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     return mrr/metric_denominator, hit1/metric_denominator, hit3/metric_denominator, hit5/metric_denominator, hit10/metric_denominator
 
 
+def save_metric_history(metric_history, save_dir, filename_prefix="metrics"):
+    os.makedirs(save_dir, exist_ok=True)
+    json_path = os.path.join(save_dir, f"{filename_prefix}.json")
+    csv_path = os.path.join(save_dir, f"{filename_prefix}.csv")
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(metric_history, f, indent=2)
+
+    keys = list(metric_history.keys())
+    rows = []
+    length = len(metric_history.get("epoch", []))
+    for i in range(length):
+        rows.append({key: metric_history[key][i] for key in keys})
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def plot_epoch_metrics(metric_history, save_dir):
     epochs = metric_history["epoch"]
     fig, axes = plt.subplots(3, 2, figsize=(12, 12), sharex=True)
@@ -1271,6 +1294,7 @@ def train(args):
                 )
 
             plot_epoch_metrics(metric_history, save_path)
+            save_metric_history(metric_history, save_path)
         else:
             logging.info(
                 "[Epoch %d/%d] train/valid evaluation skipped. validate_during_training=%s validate_interval=%d",
