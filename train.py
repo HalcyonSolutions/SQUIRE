@@ -45,6 +45,7 @@ def get_args():
     parser.add_argument("--beam-size", default=128, type=int) # during generation, beam size
     parser.add_argument("--no-filter-gen", default=False, action="store_true") # during generation, not filter unreachable next token
     parser.add_argument("--test", default=False, action="store_true") # for test mode
+    parser.add_argument("--mode", choices=("train", "eval"), default="train", help="run training or evaluation; --test remains supported as an alias for eval")
     parser.add_argument("--encoder", default=False, action="store_true") # only use TransformerEncoder
     parser.add_argument("--trainset", default="6_rev_rule")
     parser.add_argument("--loop", default=False, action="store_true") # add self-loop instead of <eos>
@@ -60,7 +61,9 @@ def get_args():
     parser.add_argument("--validate-interval", default=5, type=int, help="run train/valid evaluation every N epochs when validation is enabled")
     
     # question input related
-    parser.add_argument("--question-file", default="kinship_hinton_qa_nhop.csv", type=str, help="path to question file for question input csv file")
+    parser.add_argument("--question-file", default="kinship_hinton_qa_nhop.csv", type=str, help="fallback question CSV used for both training and evaluation when separate files are not provided")
+    parser.add_argument("--train-question-file", default=None, type=str, help="question CSV used by Seq2SeqDataset for training")
+    parser.add_argument("--eval-question-file", default=None, type=str, help="question CSV used by TestDataset for validation and test evaluation")
     parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
     parser.add_argument("--num-workers", default=0, type=int, help="number of DataLoader worker processes, CPU-only when > 0; set to 0 to disable multiprocessing")
     parser.add_argument("--eval-preview-count", default=0, type=int, help="number of readable evaluation examples to print per split; set to 0 to disable")
@@ -1403,6 +1406,8 @@ def checkpoint(args):
     if not os.path.exists(ckpt_path):
         print("Invalid path!")
         return
+    if not getattr(args, "train_question_file", None) and not getattr(args, "question_file", None):
+        args.train_question_file = getattr(args, "eval_question_file", None)
     logging.basicConfig(level=logging.DEBUG,
                     filename=save_path+'/test.log',
                     filemode='w',
@@ -1430,7 +1435,7 @@ def checkpoint(args):
 if __name__ == "__main__":
     args = get_args()
     set_seed(args.seed)
-    if args.test:
+    if args.test or args.mode == "eval":
         checkpoint(args)
     else:
         train(args)
