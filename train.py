@@ -153,6 +153,80 @@ def answer_set_f1(predicted_endpoints, gold_answers, eps=1e-8):
 
     return precision, recall, f1
 
+
+def _normalize_text_list(value):
+    parsed = parse_optional_literal(value)
+    if parsed is None:
+        return []
+    if isinstance(parsed, (list, tuple, set)):
+        values = []
+        for item in parsed:
+            text = str(item).strip()
+            if text:
+                values.append(text)
+        return values
+    text = str(parsed).strip()
+    return [text] if text else []
+
+
+def _parse_relation_sequence_value(value):
+    parsed = parse_optional_literal(value)
+    if parsed is None:
+        return []
+    if isinstance(parsed, (list, tuple, set)):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    text = str(parsed).strip()
+    if not text:
+        return []
+    if "->" in text:
+        return [part.strip() for part in text.split("->") if part.strip()]
+    return [text]
+
+
+def get_row_relation_sequence(row, columns):
+    if row is None:
+        return []
+    for column in columns:
+        if column not in row.index:
+            continue
+        relations = _parse_relation_sequence_value(row.get(column))
+        if relations:
+            return relations
+    return []
+
+
+def normalize_gold_answer_ids(gold_answers, fallback_target_id):
+    values = []
+    if gold_answers is not None:
+        if torch.is_tensor(gold_answers):
+            values = gold_answers.detach().cpu().view(-1).tolist()
+        else:
+            values = list(gold_answers)
+
+    normalized = []
+    seen = set()
+    for value in values:
+        if value is None:
+            continue
+        value = int(value)
+        if value < 0 or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+
+    fallback_target_id = int(fallback_target_id)
+    if not normalized:
+        normalized.append(fallback_target_id)
+    return normalized
+
+
+def first_correct_candidate_rank(candidate_ids, gold_answer_ids):
+    gold_answer_set = {int(answer_id) for answer_id in gold_answer_ids}
+    for idx, candidate_id in enumerate(candidate_ids):
+        if int(candidate_id) in gold_answer_set:
+            return idx
+    return None
+
 def get_row_text(row, key, default="N/A"):
 
     if row is None or key not in row:
@@ -191,10 +265,13 @@ def is_relation_symbol(symbol, dataset=None):
 def format_query_chain(row, relation_fallback):
     if row is None:
         return relation_fallback
-    query_relations = parse_optional_literal(row.get("Query-Relations"))
-    if isinstance(query_relations, list) and query_relations:
+    query_relations = get_row_relation_sequence(row, ("Query-Relations", "Query-Relation"))
+    if query_relations:
         return " -> ".join(str(relation) for relation in query_relations)
-    return get_row_text(row, "Query-Relation", relation_fallback)
+    path_key_relations = get_row_relation_sequence(row, ("Path-Key", "Path_Key"))
+    if path_key_relations:
+        return " -> ".join(str(relation) for relation in path_key_relations)
+    return relation_fallback
 
 def format_gold_path(row):
     if row is None:
@@ -319,14 +396,25 @@ def path_tokens_to_relations(path_tokens, eos, bos):
 
     return [clean[idx] for idx in range(1, len(clean), 2)]
 
-def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos, test_paraphrased=False):
+def format_gold_answers(row, gold_answer_ids, rev_dict, dataset):
+    gold_texts = []
+    if row is not None:
+        gold_texts = _normalize_text_list(row.get("Answers"))
+        if not gold_texts:
+            gold_texts = _normalize_text_list(row.get("Answer"))
+    if gold_texts:
+        return gold_texts
+    return [decode_token(answer_id, rev_dict, dataset) for answer_id in gold_answer_ids]
+
+
+def build_eval_preview(dataset, sample_id, head_id, gold_answer_ids, candidate_ids, candidate_paths, preview_topk, rank_idx, rev_dict, eos, bos, test_paraphrased=False):
     row = None
     if dataset is not None and hasattr(dataset, "data"):
         row = dataset.data.iloc[int(sample_id)]
 
     source_entity = get_row_text(row, "Source", decode_token(head_id, rev_dict, dataset))
-    relation_chain = format_query_chain(row, decode_token(relation_id, rev_dict, dataset))
-    gold_answer = get_row_text(row, "Answer", decode_token(target_id, rev_dict, dataset))
+    relation_chain = format_query_chain(row, "N/A")
+    gold_texts = format_gold_answers(row, gold_answer_ids, rev_dict, dataset)
     predicted_answer = decode_token(candidate_ids[0], rev_dict, dataset) if candidate_ids else "N/A"
     predicted_path = "N/A"
     if candidate_paths:
@@ -334,7 +422,8 @@ def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, cand
 
     top_predictions = [decode_token(candidate_id, rev_dict, dataset) for candidate_id in candidate_ids[:preview_topk]]
     rank_text = str(rank_idx + 1) if rank_idx is not None else "not ranked"
-    status = "correct" if candidate_ids and candidate_ids[0] == target_id else "incorrect"
+    gold_answer_set = set(gold_answer_ids)
+    status = "correct" if candidate_ids and candidate_ids[0] in gold_answer_set else "incorrect"
 
     if test_paraphrased:
         question_row_text = get_row_text(row, "Question-Paraphrased")
@@ -343,7 +432,7 @@ def build_eval_preview(dataset, sample_id, head_id, relation_id, target_id, cand
     lines = [
         f"Question: {question_row_text}",
         f"Structured Input: source={source_entity} | relation chain={relation_chain}",
-        f"Gold Answer: {gold_answer}",
+        f"Gold Answer{'s' if len(gold_texts) > 1 else ''}: " + " | ".join(gold_texts),
         f"Predicted Answer: {predicted_answer} ({status}; gold rank={rank_text})",
     ]
     if predicted_path != "N/A":
@@ -603,19 +692,16 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     def row_to_gt_relations(row):
         if row is None:
             return []
-        gt_relations = parse_optional_literal(row.get("Query-Relations"))
-        if isinstance(gt_relations, list) and gt_relations:
-            relation_ids = []
-            for relation in gt_relations:
-                relation_id = row_path_token_to_id(relation, is_relation=True)
-                if relation_id is not None:
-                    relation_ids.append(relation_id)
-            return relation_ids
-        gt_relation = row.get("Query-Relation")
-        if gt_relation is None or (isinstance(gt_relation, float) and math.isnan(gt_relation)):
-            return []
-        relation_id = row_path_token_to_id(gt_relation, is_relation=True)
-        return [relation_id] if relation_id is not None else []
+        relation_tokens = get_row_relation_sequence(
+            row,
+            ("Path-Key", "Path_Key", "Query-Relations", "Query-Relation"),
+        )
+        relation_ids = []
+        for relation in relation_tokens:
+            relation_id = row_path_token_to_id(relation, is_relation=True)
+            if relation_id is not None:
+                relation_ids.append(relation_id)
+        return relation_ids
 
     def row_to_hop_count(row):
         if row is None:
@@ -656,6 +742,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     sample_id = samples["ids"][i].detach().cpu().tolist() if "ids" in samples else count + i
                     head_id = samples["head_id"][i].detach().cpu().tolist()
                     target_id = samples["target"][i].detach().cpu().view(-1)[0].tolist()
+                    gold_answer_ids = normalize_gold_answer_ids(
+                        samples["gold_answers"][i] if "gold_answers" in samples else None,
+                        target_id,
+                    )
                     debug_blocks.append([
                         "================ SAMPLE =================",
                         "[INPUT]",
@@ -663,6 +753,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         f"Question: {debug_question(sample_id, test_paraphrased=args.test_paraphrased)}",
                         f"Head ID: {debug_token(head_id)}",
                         f"Target ID: {debug_token(target_id)}",
+                        "Gold Answers: " + " | ".join(debug_token(answer_id) for answer_id in gold_answer_ids),
                     ])
 
             candidates = [dict() for i in range(batch_size)]
@@ -880,8 +971,12 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 else:
                     candidate = torch.empty(0, dtype=torch.long)
                 target_id = target[i].item()
-                ranking = (candidate[:] == target_id).nonzero(as_tuple=False)
-                rank_idx = None
+                gold_answers = normalize_gold_answer_ids(
+                    samples["gold_answers"][i] if "gold_answers" in samples else None,
+                    target_id,
+                )
+                gold_answer_set = set(gold_answers)
+                rank_idx = first_correct_candidate_rank(candidate_ids, gold_answers)
                 row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
                 hop_count = row_to_hop_count(row)
                 pred_edges = path_tokens_to_edges(candidate_path[0], eos, bos) if candidate_path else []
@@ -890,16 +985,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 gt_relations = row_to_gt_relations(row)
                 answer_set_topk = max(1, args.answer_set_topk)
                 predicted_endpoints = candidate_ids[:answer_set_topk]
-                gold_answers = [target_id]
-                if row is not None:
-                    row_answers = parse_optional_literal(row.get("Answers"))
-                    if isinstance(row_answers, list) and row_answers:
-                        parsed_gold_answers = []
-                        for answer in row_answers:
-                            answer_id = row_path_token_to_id(answer, is_relation=False)
-                            if answer_id is not None:
-                                parsed_gold_answers.append(answer_id)
-                        gold_answers = parsed_gold_answers
                 answer_p, answer_r, answer_f1 = answer_set_f1(predicted_endpoints, gold_answers)
                 answer_f1_sum += answer_f1
                 answer_p_sum += answer_p
@@ -908,7 +993,11 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 if gt_edges:
                     _, _, sample_edge_f1 = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
                     edge_f1 += sample_edge_f1
-                sample_relation_edit_distance = relation_edit_distance(pred_relations, gt_relations, special_tokens, inverse_mapping)
+                # Multi-answer rows may omit a gold path entirely. In that case
+                # there is no reliable gold relation sequence to compare against.
+                sample_relation_edit_distance = 0.0
+                if gt_relations:
+                    sample_relation_edit_distance = relation_edit_distance(pred_relations, gt_relations, special_tokens, inverse_mapping)
                 relation_edit_distance_sum += sample_relation_edit_distance
                 if args.test_paraphrased:
                     question_text = get_row_text(row, "Question-Paraphrased")
@@ -916,7 +1005,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     question_text = get_row_text(row, "Question")
 
                 head_label = get_row_text(row, "Source", decode_token(hid, rev_dict, dataset))
-                target_label = get_row_text(row, "Answer", decode_token(target_id, rev_dict, dataset))
+                target_label = " | ".join(format_gold_answers(row, gold_answers, rev_dict, dataset))
                 path_token = f"{question_text}\t{head_label} | {target_label}\t"
                 sample_mrr = 0.0
                 sample_hit1 = 0
@@ -924,8 +1013,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 sample_hit5 = 0
                 sample_hit10 = 0
 
-                if ranking.nelement() != 0:
-                    rank_idx = ranking[0].item()
+                if rank_idx is not None:
                     path = candidate_path[rank_idx]
                     path_token += format_generated_path(head_label, path, rev_dict, dataset, eos, bos) + '\t'
                     path_token += str(rank_idx)
@@ -966,7 +1054,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         "[RANKING]",
                         f"Sorted candidates: {candidate_ids}",
                         "Sorted decoded: " + " | ".join(debug_token(candidate_id) for candidate_id in candidate_ids),
-                        f"Gold: {debug_token(target_id)}",
+                        "Gold: " + " | ".join(debug_token(answer_id) for answer_id in gold_answers),
                         f"Rank: {rank_text}",
                         f"Top-1: {debug_token(top1) if top1 is not None else None}",
                         "========================================",
@@ -981,8 +1069,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                             dataset=dataset,
                             sample_id=samples["ids"][i].item(),
                             head_id=hid,
-                            relation_id=rid,
-                            target_id=target_id,
+                            gold_answer_ids=gold_answers,
                             candidate_ids=candidate_ids,
                             candidate_paths=candidate_path,
                             preview_topk=preview_topk,
@@ -1108,6 +1195,11 @@ def train(args):
         "worker_init_fn": seed_worker,
     }
     train_set = Seq2SeqDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, split="train", args=args)
+    if not getattr(train_set, "has_paths", True):
+        raise ValueError(
+            "SQUIRE path-supervised training requires a Paths column. "
+            "This question file appears to be a multi-answer evaluation file without Paths."
+        )
     valid_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="valid_triples.txt", split="dev", args=args)
     train_eval_set = TestDataset(data_path=args.dataset+"/", vocab_file=args.dataset+"/vocab.txt", device=device, src_file="train_triples.txt", split="train", args=args)
     train_valid, eval_valid = train_set.get_next_valid()
