@@ -16,14 +16,115 @@ import re
 
 
 DIRECT_REVERSE_SUFFIX = "_reverse"
+ANSWER_ENTITY_COLUMNS = ("Answer-Entities", "Answers-Entities", "Answer-Entity")
+ANSWER_TEXT_COLUMNS = ("Answers", "Answer")
+
+
+def _parse_literal_cell(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return text
+    return value
 
 
 def _parse_paths_cell(value):
+    parsed = _parse_literal_cell(value)
+    return [] if parsed is None else parsed
+
+
+def _dedupe_preserve_order(values):
+    deduped = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _flatten_scalar_values(value):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return []
-    if isinstance(value, str):
-        return ast.literal_eval(value)
-    return value
+    if isinstance(value, (list, tuple, set)):
+        flattened = []
+        for item in value:
+            flattened.extend(_flatten_scalar_values(item))
+        return flattened
+    text = _normalize_label_text(value)
+    return [text] if text is not None else []
+
+
+def _normalize_list_like_cell(value):
+    parsed = _parse_literal_cell(value)
+    return _dedupe_preserve_order(_flatten_scalar_values(parsed))
+
+
+def _get_first_nonempty_row_values(row, columns):
+    for column in columns:
+        if column not in row.index:
+            continue
+        values = _normalize_list_like_cell(row.get(column))
+        if values:
+            return values
+    return []
+
+
+def _get_row_answer_texts(row):
+    return _get_first_nonempty_row_values(row, ANSWER_TEXT_COLUMNS)
+
+
+def _get_row_answer_entities(row):
+    entity_values = _get_first_nonempty_row_values(row, ANSWER_ENTITY_COLUMNS)
+    if entity_values:
+        return entity_values
+    return _get_row_answer_texts(row)
+
+
+def _resolve_entity_token_to_dictionary_id(container, token):
+    if token is None:
+        return None
+    token = str(token)
+
+    if hasattr(container, "entity2id") and token in container.entity2id:
+        mapped_token = container.entity2id[token]
+        dict_id = container.dictionary.indices.get(mapped_token)
+        if dict_id is not None:
+            return dict_id
+
+    dict_id = container.dictionary.indices.get(token)
+    if dict_id is not None:
+        return dict_id
+
+    label2entity_ids = getattr(container, "label2entity_ids", {})
+    if token in label2entity_ids:
+        for entity_token in label2entity_ids[token]:
+            dict_id = _resolve_entity_token_to_dictionary_id(container, entity_token)
+            if dict_id is not None:
+                return dict_id
+
+    return None
+
+
+def _iter_row_entity_label_pairs(row):
+    source_entities = _normalize_list_like_cell(row.get("Source-Entity"))
+    source_labels = _normalize_list_like_cell(row.get("Source"))
+    for idx, entity in enumerate(source_entities):
+        label = source_labels[idx] if idx < len(source_labels) else None
+        yield entity, label
+
+    answer_entities = _get_row_answer_entities(row)
+    answer_labels = _get_row_answer_texts(row)
+    for idx, entity in enumerate(answer_entities):
+        label = answer_labels[idx] if idx < len(answer_labels) else None
+        yield entity, label
 
 
 def _flatten_path_hops(paths):
@@ -118,6 +219,11 @@ def _iter_triple_file(path):
 
 def _infer_direct_id_mode(dataframe):
     if "Paths" not in dataframe.columns:
+        for _, row in dataframe.iterrows():
+            source_entities = _normalize_list_like_cell(row.get("Source-Entity"))
+            answer_entities = _get_row_answer_entities(row)
+            if any(_is_wikidata_entity(token) for token in source_entities + answer_entities):
+                return True
         return False
     for value in dataframe["Paths"]:
         try:
@@ -134,21 +240,24 @@ def _infer_direct_id_mode(dataframe):
             and _is_wikidata_relation(tgt_line[1])
             and _is_wikidata_entity(tgt_line[2])
         )
+    for _, row in dataframe.iterrows():
+        source_entities = _normalize_list_like_cell(row.get("Source-Entity"))
+        answer_entities = _get_row_answer_entities(row)
+        if any(_is_wikidata_entity(token) for token in source_entities + answer_entities):
+            return True
     return False
 
 
 def _direct_vocab_is_compatible(dictionary, dataframe):
     sample_tokens = []
-    for column in ("Source-Entity", "Answer-Entity"):
-        if column not in dataframe.columns:
-            continue
-        for value in dataframe[column]:
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                continue
-            token = str(value)
+    for _, row in dataframe.iterrows():
+        row_entities = _normalize_list_like_cell(row.get("Source-Entity")) + _get_row_answer_entities(row)
+        for token in row_entities:
             if _is_wikidata_entity(token):
                 sample_tokens.append(token)
                 break
+        if sample_tokens:
+            break
     if "Paths" in dataframe.columns:
         for value in dataframe["Paths"]:
             try:
@@ -169,13 +278,8 @@ def _collect_direct_vocab_tokens(data_path, dataframe):
     entities = set()
     relations = set()
 
-    for column in ("Source-Entity", "Answer-Entity"):
-        if column not in dataframe.columns:
-            continue
-        for value in dataframe[column]:
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                continue
-            token = str(value)
+    for _, row in dataframe.iterrows():
+        for token in _normalize_list_like_cell(row.get("Source-Entity")) + _get_row_answer_entities(row):
             if _is_wikidata_entity(token):
                 entities.add(token)
 
@@ -220,6 +324,7 @@ class Seq2SeqDataset(Dataset):
         self.data = pd.read_csv(self.csv_file)
         if split is not None:
             self.data = self.data[self.data["SplitLabel"] == split].reset_index(drop=True)
+        self.has_paths = "Paths" in self.data.columns
         self.direct_id_mode = _infer_direct_id_mode(self.data)
 
         if Seq2SeqDataset._tokenizer is None:
@@ -278,6 +383,17 @@ class Seq2SeqDataset(Dataset):
     def _load_mappings(self):
         self.entity2id = {}
         self.id2entity = {}
+        self.label2entity_ids = {}
+
+        def add_entity_label_mapping(entity_token, label):
+            entity_token = str(entity_token)
+            label_text = _normalize_label_text(label)
+            if label_text is None:
+                return
+            self.label2entity_ids.setdefault(label_text, [])
+            if entity_token not in self.label2entity_ids[label_text]:
+                self.label2entity_ids[label_text].append(entity_token)
+
         if self.direct_id_mode:
             self.relation2id = {}
             self.id2relation = {}
@@ -292,6 +408,7 @@ class Seq2SeqDataset(Dataset):
                     self.id2entity[token] = label_text
                 else:
                     self.id2entity.setdefault(token, token)
+                add_entity_label_mapping(token, label_text)
 
             def add_relation(token, label=None):
                 token = str(token)
@@ -313,8 +430,8 @@ class Seq2SeqDataset(Dataset):
                     self.id2relation.setdefault(rev_token, reverse_label)
 
             for _, row in self.data.iterrows():
-                add_entity(row.get("Source-Entity"), row.get("Source"))
-                add_entity(row.get("Answer-Entity"), row.get("Answer"))
+                for entity_token, label in _iter_row_entity_label_pairs(row):
+                    add_entity(entity_token, label)
 
                 try:
                     paths = _parse_paths_cell(row.get("Paths"))
@@ -340,13 +457,8 @@ class Seq2SeqDataset(Dataset):
                     add_relation(hop[1], label_hop[1] if len(label_hop) > 1 else None)
                     add_entity(hop[2], label_hop[2] if len(label_hop) > 2 else None)
 
-            for column in ("Source-Entity", "Answer-Entity"):
-                if column not in self.data.columns:
-                    continue
-                for value in self.data[column]:
-                    if value is None or (isinstance(value, float) and pd.isna(value)):
-                        continue
-                    token = str(value)
+            for _, row in self.data.iterrows():
+                for token in _normalize_list_like_cell(row.get("Source-Entity")) + _get_row_answer_entities(row):
                     if _is_wikidata_entity(token):
                         self.entity2id[token] = token
                         self.id2entity.setdefault(token, token)
@@ -391,6 +503,11 @@ class Seq2SeqDataset(Dataset):
             self.id2relation["R" + rid] = r
             self.id2relation["R" + str(int(rid) + num_relations)] = f"{r} (reverse)"
 
+        for _, row in self.data.iterrows():
+            for entity_token, label in _iter_row_entity_label_pairs(row):
+                if entity_token in self.entity2id:
+                    add_entity_label_mapping(entity_token, label)
+
     def __getitem__(self, index):
         row = self.data.iloc[index]
         
@@ -400,6 +517,11 @@ class Seq2SeqDataset(Dataset):
         else:
             question = str(row["Question"])
 
+        if "Paths" not in row.index:
+            raise ValueError(
+                "SQUIRE path-supervised training requires a Paths column. "
+                "This question file appears to be a multi-answer evaluation file without Paths."
+            )
         paths = _parse_paths_cell(row["Paths"])
         tgt_line = _flatten_path_hops(paths)
         tgt_line_ids = []
@@ -664,8 +786,13 @@ class TestDataset(Dataset):
             question = paraphrased_questions[0] if paraphrased_questions else str(row["Question"])
         else:
             question = str(row["Question"])
-        answer = str(row["Answer-Entity"])
-        head = str(row["Source-Entity"])
+        answer_tokens = _get_row_answer_entities(row)
+        if not answer_tokens:
+            raise ValueError(f"No answer entity found for row {index} in {self.csv_file}")
+        head_tokens = _normalize_list_like_cell(row.get("Source-Entity"))
+        if not head_tokens:
+            raise ValueError(f"No source entity found for row {index} in {self.csv_file}")
+        head = head_tokens[0]
         encoded_question = self.tokenizer(
             question,
             padding='max_length',
@@ -673,28 +800,28 @@ class TestDataset(Dataset):
             max_length=self.max_q_len,
             return_tensors='pt'
         )
-        try:
-            answer_id = self.entity2id[answer]
-        except KeyError:
-            raise ValueError(f"Unknown entity: {answer}")
+        gold_answer_ids = []
+        for answer in answer_tokens:
+            answer_id = _resolve_entity_token_to_dictionary_id(self, answer)
+            if answer_id is None:
+                continue
+            gold_answer_ids.append(answer_id)
+        gold_answer_ids = _dedupe_preserve_order(gold_answer_ids)
+        if not gold_answer_ids:
+            raise ValueError(f"Unknown answer entities for row {index}: {answer_tokens}")
 
-        try:
-            head_id = self.entity2id[head]
-        except KeyError:
+        head_id = _resolve_entity_token_to_dictionary_id(self, head)
+        if head_id is None:
             raise ValueError(f"Unknown head entity: {head}")
 
-        head_token = head_id
-        head_id = self.dictionary.indices.get(head_token)
-        if head_id is None:
-            raise ValueError(f"Head token not in dictionary: {head_token}")
-
-        target_id = self.dictionary.encode_line([answer_id])[:-1]
+        target_id = torch.tensor([gold_answer_ids[0]], dtype=torch.long)
         return {
             "id": index,
             "input_ids": encoded_question["input_ids"].squeeze(0),
             "attention_mask": encoded_question["attention_mask"].squeeze(0),
             "target": target_id,
             "head_id": torch.tensor(head_id, dtype=torch.long),
+            "gold_answers": torch.tensor(gold_answer_ids, dtype=torch.long),
         }
 
     def collate_fn(self, samples):
@@ -703,6 +830,8 @@ class TestDataset(Dataset):
         attention_mask = torch.stack([sample["attention_mask"] for sample in samples])
         target = torch.LongTensor(bsz, 1)
         head_id = torch.LongTensor(bsz)
+        max_gold_answers = max(max(sample["gold_answers"].numel(), 1) for sample in samples)
+        gold_answers = torch.full((bsz, max_gold_answers), -1, dtype=torch.long)
 
         ids =  []
         for idx, sample in enumerate(samples):
@@ -712,6 +841,7 @@ class TestDataset(Dataset):
             attention_mask[idx] = sample["attention_mask"]
             target[idx, 0] = target_ids[0]
             head_id[idx] = sample["head_id"]
+            gold_answers[idx, : sample["gold_answers"].numel()] = sample["gold_answers"]
         
         # Keep worker processes CPU-only. The evaluation loop moves tensor
         # batches to the target device after DataLoader returns them.
@@ -721,4 +851,5 @@ class TestDataset(Dataset):
             "attention_mask": attention_mask,
             "target": target,
             "head_id": head_id,
+            "gold_answers": gold_answers,
         }
