@@ -217,6 +217,16 @@ def _iter_triple_file(path):
             yield tuple(str(part) for part in parts)
 
 
+def _resolve_question_csv_path(args, data_path, prefer_eval=False):
+    preferred_attr = "eval_question_file" if prefer_eval else "train_question_file"
+    csv_file = getattr(args, preferred_attr, None)
+    if not csv_file:
+        csv_file = getattr(args, "question_file", None)
+    if not csv_file:
+        raise ValueError(f"args.{preferred_attr} or args.question_file is required")
+    return os.path.join(data_path, csv_file)
+
+
 def _infer_direct_id_mode(dataframe):
     if "Paths" not in dataframe.columns:
         for _, row in dataframe.iterrows():
@@ -316,10 +326,7 @@ class Seq2SeqDataset(Dataset):
     def __init__(self, data_path="FB15K237/", vocab_file="FB15K237/vocab.txt", device="cpu", args=None, split: str = None):
         self.data_path = data_path
 
-        csv_file = getattr(args, "question_file", None)
-        self.csv_file =os.path.join(data_path, csv_file) if csv_file else None 
-        if self.csv_file is None:
-            raise ValueError("args.question_file is required")
+        self.csv_file = _resolve_question_csv_path(args, data_path, prefer_eval=False)
 
         self.data = pd.read_csv(self.csv_file)
         if split is not None:
@@ -746,10 +753,7 @@ class Seq2SeqDataset(Dataset):
 class TestDataset(Dataset):
     def __init__(self, data_path="FB15K237/", vocab_file="FB15K237/vocab.txt", device="cpu", src_file=None, args=None, split: str = None):
         self.data_path = data_path
-        csv_file = getattr(args, "question_file", None)
-        self.csv_file = os.path.join(data_path, csv_file) if csv_file else None
-        if self.csv_file is None:
-            raise ValueError("args.question_file is required")
+        self.csv_file = _resolve_question_csv_path(args, data_path, prefer_eval=True)
 
         self.data = pd.read_csv(self.csv_file)
         if split is not None:
