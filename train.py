@@ -122,6 +122,20 @@ def relation_edit_distance(
     dist, _, _ = edit_distance(pred_rels, gt_rels)
     return dist
 
+def relation_f1(
+    pred_relations: Sequence[int],
+    gt_relations: Sequence[int],
+    special_tokens: Set[int],
+    inverse_mapping: Dict[int, int],
+) -> Tuple[float, float, float]:
+    pred_rels = {
+        canon_rel(r, inverse_mapping)
+        for r in pred_relations
+        if r not in special_tokens
+    }
+    gt_rels = set(gt_relations)
+    return compute_precision_recall_f1(pred_rels, gt_rels)
+
 def canon_rel(r: int, inverse_mapping: Dict[int, int]) -> int:
     return inverse_mapping.get(r, r)
 
@@ -543,7 +557,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     l_punish = args.l_punish
     max_len = 2 * args.max_len + 2
     restricted_punish = -30
-    mrr, hit, hit1, hit3, hit5, hit10, edge_f1, relation_edit_distance_sum, answer_f1_sum, answer_p_sum, answer_r_sum, count = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    mrr, hit, hit1, hit3, hit5, hit10, f1_sg, red_sum, relation_f1_sum, path_edit_distance_sum, answer_f1_sum, answer_p_sum, answer_r_sum, count = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     vocab_size = len(model.dictionary)
     eos = model.dictionary.eos()
     bos = model.dictionary.bos()
@@ -562,8 +576,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             "hit3": 0,
             "hit5": 0,
             "hit10": 0,
-            "edge_f1": 0,
-            "relation_edit_distance": 0,
+            "f1_sg": 0,
+            "red": 0,
+            "f1_rel": 0,
+            "ped": 0,
             "answer_f1": 0,
         }
         for hop in (2, 3, 4)
@@ -733,8 +749,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         for samples in pbar:
             samples = move_batch_to_device(samples, device)
             pbar.set_description(
-                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f, EdgeF1: %f, RelED: %f, AnswerF1: %f"
-                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), edge_f1/max(1, count), relation_edit_distance_sum/max(1, count), answer_f1_sum/max(1, count))
+                "%s Eval | MRR: %f, Hit@1: %f, Hit@3: %f, Hit@5: %f, Hit@10: %f, F1_SG: %f, RED: %f, F1_REL: %f, PED: %f, AnswerF1: %f"
+                % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), f1_sg/max(1, count), red_sum/max(1, count), relation_f1_sum/max(1, count), path_edit_distance_sum/max(1, count), answer_f1_sum/max(1, count))
             )
             batch_size = samples["input_ids"].size(0)
             debug_limit = 0
@@ -992,16 +1008,27 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 answer_f1_sum += answer_f1
                 answer_p_sum += answer_p
                 answer_r_sum += answer_r
-                sample_edge_f1 = 0.0
+                sample_f1_sg = 0.0
                 if gt_edges:
-                    _, _, sample_edge_f1 = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
-                    edge_f1 += sample_edge_f1
+                    _, _, sample_f1_sg = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
+                    f1_sg += sample_f1_sg
+                sample_ped = 0.0
+                if gt_edges:
+                    pred_edges_seq = pred_edges
+                    gt_edges_seq = gt_edges
+                    dist, _, _ = edit_distance(pred_edges_seq, gt_edges_seq)
+                    sample_ped = dist
+                path_edit_distance_sum += sample_ped
                 # Multi-answer rows may omit a gold path entirely. In that case
                 # there is no reliable gold relation sequence to compare against.
                 sample_relation_edit_distance = 0.0
                 if gt_relations:
                     sample_relation_edit_distance = relation_edit_distance(pred_relations, gt_relations, special_tokens, inverse_mapping)
-                relation_edit_distance_sum += sample_relation_edit_distance
+                red_sum += sample_relation_edit_distance
+                sample_f1_rel = 0.0
+                if gt_relations:
+                    _, _, sample_f1_rel = relation_f1(pred_relations, gt_relations, special_tokens, inverse_mapping)
+                    relation_f1_sum += sample_f1_rel
                 if args.test_paraphrased:
                     question_text = get_row_text(row, "Question-Paraphrased")
                 else:
@@ -1046,8 +1073,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     hop_metric["hit3"] += sample_hit3
                     hop_metric["hit5"] += sample_hit5
                     hop_metric["hit10"] += sample_hit10
-                    hop_metric["edge_f1"] += sample_edge_f1
-                    hop_metric["relation_edit_distance"] += sample_relation_edit_distance
+                    hop_metric["f1_sg"] += sample_f1_sg
+                    hop_metric["red"] += sample_relation_edit_distance
+                    hop_metric["f1_rel"] += sample_f1_rel
+                    hop_metric["ped"] += sample_ped
                     hop_metric["answer_f1"] += answer_f1
                 lines.append(path_token+'\n')
                 if debug_sample:
@@ -1094,15 +1123,17 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             write_tqdm_block(block)
             if idx != len(preview_blocks):
                 tqdm.write("")
-    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f, RelED: %.6f, AnswerF1: %.6f" % (
+    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, F1_SG: %.6f, RED: %.6f, F1_REL: %.6f, PED: %.6f, AnswerF1: %.6f" % (
         split_name.upper(),
         mrr/metric_denominator,
         hit1/metric_denominator,
         hit3/metric_denominator,
         hit5/metric_denominator,
         hit10/metric_denominator,
-        edge_f1/metric_denominator,
-        relation_edit_distance_sum/metric_denominator,
+        f1_sg/metric_denominator,
+        red_sum/metric_denominator,
+        relation_f1_sum/metric_denominator,
+        path_edit_distance_sum/metric_denominator,
         answer_f1_sum/metric_denominator,
     )
     tqdm.write(summary)
@@ -1112,7 +1143,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         if hop_metric["count"] == 0:
             continue
         hop_denominator = hop_metric["count"]
-        hop_summary = "[%s %d-hop] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, EdgeF1: %.6f, RelED: %.6f, AnswerF1: %.6f" % (
+        hop_summary = "[%s %d-hop] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, F1_SG: %.6f, RED: %.6f, F1_REL: %.6f, PED: %.6f, AnswerF1: %.6f" % (
             split_name.upper(),
             hop,
             hop_metric["mrr"] / hop_denominator,
@@ -1120,8 +1151,10 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             hop_metric["hit3"] / hop_denominator,
             hop_metric["hit5"] / hop_denominator,
             hop_metric["hit10"] / hop_denominator,
-            hop_metric["edge_f1"] / hop_denominator,
-            hop_metric["relation_edit_distance"] / hop_denominator,
+            hop_metric["f1_sg"] / hop_denominator,
+            hop_metric["red"] / hop_denominator,
+            hop_metric["f1_rel"] / hop_denominator,
+            hop_metric["ped"] / hop_denominator,
             hop_metric["answer_f1"] / hop_denominator,
         )
         tqdm.write(hop_summary)
