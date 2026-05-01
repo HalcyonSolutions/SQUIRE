@@ -715,6 +715,16 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             row,
             ("Path-Key", "Path_Key", "Query-Relations", "Query-Relation"),
         )
+        if not relation_tokens:
+            gt_paths = parse_optional_literal(row.get("Paths"))
+            if not isinstance(gt_paths, list) or not gt_paths:
+                gt_paths = parse_optional_literal(row.get("Paths-Label"))
+            if isinstance(gt_paths, list):
+                relation_tokens = [
+                    str(hop[1]).strip()
+                    for hop in gt_paths
+                    if isinstance(hop, (list, tuple)) and len(hop) >= 2 and str(hop[1]).strip()
+                ]
         relation_ids = []
         for relation in relation_tokens:
             relation_id = row_path_token_to_id(relation, is_relation=True)
