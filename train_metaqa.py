@@ -130,6 +130,26 @@ def first_correct_candidate_rank(candidate_ids, gold_answer_ids):
             return idx
     return None
 
+def row_to_hop_count(row):
+    if row is None:
+        return None
+    for column_name in ("Hops", "Num-Hops", "N-Hop", "hop", "num_hops"):
+        if column_name not in row.index:
+            continue
+        hop_value = row.get(column_name)
+        if hop_value is None:
+            continue
+        if isinstance(hop_value, (int, np.integer)):
+            return int(hop_value)
+        if isinstance(hop_value, float):
+            if np.isnan(hop_value):
+                continue
+            return int(hop_value)
+        hop_digits = "".join(ch for ch in str(hop_value) if ch.isdigit())
+        if hop_digits:
+            return int(hop_digits)
+    return None
+
 
 def answer_set_f1(predicted_endpoints, gold_answers, eps=1e-8):
     pred_set = set(predicted_endpoints)
@@ -164,14 +184,10 @@ def save_metric_history(metric_history, save_dir, filename_prefix="metrics_metaq
 
 def plot_epoch_metrics(metric_history, save_dir):
     epochs = metric_history["epoch"]
-    fig, axes = plt.subplots(3, 2, figsize=(12, 12), sharex=True)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharex=True)
     metric_specs = [
         ("mrr", "MRR"),
         ("hit1", "Hit@1"),
-        ("hit3", "Hit@3"),
-        ("hit5", "Hit@5"),
-        ("hit10", "Hit@10"),
-        ("answer_f1", "AnswerF1"),
     ]
 
     for ax, (key, title) in zip(axes.flat, metric_specs):
@@ -305,13 +321,11 @@ def evaluate(model, dataloader, device, args, entity_candidate_ids, entity_mask,
     metric_totals = {
         "mrr": 0.0,
         "hit1": 0.0,
-        "hit3": 0.0,
-        "hit5": 0.0,
-        "hit10": 0.0,
-        "answer_f1": 0.0,
         "count": 0,
     }
     split_label = split_name.title()
+    dataset = getattr(dataloader, "dataset", None)
+    hop_metrics = {}
 
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
@@ -332,36 +346,35 @@ def evaluate(model, dataloader, device, args, entity_candidate_ids, entity_mask,
                 gold_answers = normalize_gold_answer_ids(samples["gold_answers"][row_idx], target_id)
                 candidate_ids = ranked_candidate_ids[row_idx].detach().cpu().tolist()
                 rank_idx = first_correct_candidate_rank(candidate_ids, gold_answers)
+                row = dataset.data.iloc[int(samples["ids"][row_idx].item())] if dataset is not None and hasattr(dataset, "data") else None
+                hop_count = row_to_hop_count(row)
 
                 metric_totals["count"] += 1
+                sample_mrr = 0.0
+                sample_hit1 = 0
                 if rank_idx is not None:
                     ranking_value = rank_idx + 1
-                    metric_totals["mrr"] += 1.0 / ranking_value
+                    sample_mrr = 1.0 / ranking_value
+                    metric_totals["mrr"] += sample_mrr
                     if ranking_value <= 1:
                         metric_totals["hit1"] += 1
-                    if ranking_value <= 3:
-                        metric_totals["hit3"] += 1
-                    if ranking_value <= 5:
-                        metric_totals["hit5"] += 1
-                    if ranking_value <= 10:
-                        metric_totals["hit10"] += 1
+                        sample_hit1 = 1
 
-                answer_set_topk = min(max(1, args.answer_set_topk), len(candidate_ids))
-                predicted_endpoints = candidate_ids[:answer_set_topk]
-                _, _, answer_f1 = answer_set_f1(predicted_endpoints, gold_answers)
-                metric_totals["answer_f1"] += answer_f1
+                if hop_count is not None:
+                    if hop_count not in hop_metrics:
+                        hop_metrics[hop_count] = {"mrr": 0.0, "hit1": 0.0, "count": 0}
+                    hop_metric = hop_metrics[hop_count]
+                    hop_metric["count"] += 1
+                    hop_metric["mrr"] += sample_mrr
+                    hop_metric["hit1"] += sample_hit1
 
             denominator = max(1, metric_totals["count"])
             pbar.set_description(
-                "%s Eval | MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, AnswerF1: %.6f"
+                "%s Eval | MRR: %.6f, Hit@1: %.6f"
                 % (
                     split_label,
                     metric_totals["mrr"] / denominator,
                     metric_totals["hit1"] / denominator,
-                    metric_totals["hit3"] / denominator,
-                    metric_totals["hit5"] / denominator,
-                    metric_totals["hit10"] / denominator,
-                    metric_totals["answer_f1"] / denominator,
                 )
             )
 
@@ -369,22 +382,27 @@ def evaluate(model, dataloader, device, args, entity_candidate_ids, entity_mask,
     metrics = {
         "mrr": metric_totals["mrr"] / denominator,
         "hit1": metric_totals["hit1"] / denominator,
-        "hit3": metric_totals["hit3"] / denominator,
-        "hit5": metric_totals["hit5"] / denominator,
-        "hit10": metric_totals["hit10"] / denominator,
-        "answer_f1": metric_totals["answer_f1"] / denominator,
     }
-    summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, AnswerF1: %.6f" % (
+    summary = "[%s] MRR: %.6f, Hit@1: %.6f" % (
         split_name.upper(),
         metrics["mrr"],
         metrics["hit1"],
-        metrics["hit3"],
-        metrics["hit5"],
-        metrics["hit10"],
-        metrics["answer_f1"],
     )
     tqdm.write(summary)
     logging.info(summary)
+    for hop in sorted(hop_metrics):
+        hop_metric = hop_metrics[hop]
+        if hop_metric["count"] == 0:
+            continue
+        hop_denominator = hop_metric["count"]
+        hop_summary = "[%s %d-hop] MRR: %.6f, Hit@1: %.6f" % (
+            split_name.upper(),
+            hop,
+            hop_metric["mrr"] / hop_denominator,
+            hop_metric["hit1"] / hop_denominator,
+        )
+        tqdm.write(hop_summary)
+        logging.info(hop_summary)
     return metrics
 
 
@@ -471,14 +489,6 @@ def train(args):
         "valid_mrr": [],
         "train_hit1": [],
         "valid_hit1": [],
-        "train_hit3": [],
-        "valid_hit3": [],
-        "train_hit5": [],
-        "valid_hit5": [],
-        "train_hit10": [],
-        "valid_hit10": [],
-        "train_answer_f1": [],
-        "valid_answer_f1": [],
     }
 
     for epoch in range(args.num_epoch):
@@ -542,14 +552,6 @@ def train(args):
         metric_history["valid_mrr"].append(valid_metrics["mrr"])
         metric_history["train_hit1"].append(train_metrics["hit1"])
         metric_history["valid_hit1"].append(valid_metrics["hit1"])
-        metric_history["train_hit3"].append(train_metrics["hit3"])
-        metric_history["valid_hit3"].append(valid_metrics["hit3"])
-        metric_history["train_hit5"].append(train_metrics["hit5"])
-        metric_history["valid_hit5"].append(valid_metrics["hit5"])
-        metric_history["train_hit10"].append(train_metrics["hit10"])
-        metric_history["valid_hit10"].append(valid_metrics["hit10"])
-        metric_history["train_answer_f1"].append(train_metrics["answer_f1"])
-        metric_history["valid_answer_f1"].append(valid_metrics["answer_f1"])
 
         if valid_metrics["hit1"] > best_hit1:
             best_hit1 = valid_metrics["hit1"]
