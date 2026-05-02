@@ -28,7 +28,7 @@ class DummyReportingModel(torch.nn.Module):
         return logits
 
 
-def test_train_reporting_stats_use_eval_mode_and_restore_training_state():
+def test_train_metrics_use_eval_mode_and_restore_training_state():
     model = DummyReportingModel()
     model.train()
 
@@ -40,12 +40,9 @@ def test_train_reporting_stats_use_eval_mode_and_restore_training_state():
         "mask": torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], dtype=torch.float32),
     }
 
-    logits, pred, last_idx, token_acc, last_acc = train_module.compute_train_reporting_stats(model, samples)
+    token_acc, last_acc = train_module.compute_train_metrics(model, samples)
 
     assert model.training is True
     assert model.training_flags == [False]
-    assert logits.shape == (2, 3, model.vocab_size)
-    torch.testing.assert_close(pred, samples["target"])
-    torch.testing.assert_close(last_idx, torch.tensor([1, 1], dtype=torch.long))
     assert token_acc.item() == 1.0
     assert last_acc.item() == 1.0

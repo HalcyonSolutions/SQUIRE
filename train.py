@@ -426,10 +426,10 @@ def move_batch_to_device(batch, device):
             moved[key] = value
     return moved
 
-def compute_train_reporting_stats(model, samples):
+def compute_train_metrics(model, samples):
     """
-    Run the train-side reporting forward pass in eval mode so debug metrics
-    and previews do not perturb dropout/stateful layers used by optimization.
+    Compute train batch accuracy metrics in eval mode so reporting does not
+    perturb dropout/stateful layers used by optimization.
     """
     was_training = model.training
     if was_training:
@@ -460,7 +460,7 @@ def compute_train_reporting_stats(model, samples):
         if was_training:
             model.train()
 
-    return logits, pred, last_idx, token_acc, last_acc
+    return token_acc, last_acc
 
 def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=None, split_name="eval"):
     model.eval()
@@ -964,9 +964,7 @@ def train(args):
     train_eval_loader = DataLoader(train_eval_set, batch_size=args.test_batch_size, collate_fn=valid_set.collate_fn, shuffle=False, generator=build_dataloader_generator(args.seed + 2), **loader_kwargs)
 
     model = TransformerModel(args, train_set.dictionary).to(device)
-    train_preview_rev_dict = build_rev_dict(train_set.dictionary)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    steps = len(train_loader)
     total_step_num = len(train_loader) * args.num_epoch
     warmup_steps = total_step_num / args.warmup
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, total_step_num)
@@ -986,7 +984,6 @@ def train(args):
         "train_hit10": [],
         "valid_hit10": [],
     }
-    steps = 0
     for epoch in range(args.num_epoch):
 
         model.train()
@@ -994,32 +991,16 @@ def train(args):
             losses = []
             token_accs = []
             last_accs = []
-            for batch_idx, samples in enumerate(pbar):
+            for samples in pbar:
                 samples = move_batch_to_device(samples, device)
                 optimizer.zero_grad()
                 loss = model.get_loss(**samples)
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
-                steps += 1
                 losses.append(loss.item())
 
-                logits, pred, last_idx, token_acc, last_acc = compute_train_reporting_stats(model, samples)
-
-                if args.train_preview_count > 0 and (batch_idx == 0 or steps % max(1, args.train_preview_interval) == 0):
-                    preview_block = build_train_preview(
-                        samples,
-                        pred,
-                        logits,
-                        last_idx,
-                        train_set,
-                        train_preview_rev_dict,
-                        args,
-                        steps
-                    )
-                    write_tqdm_block(preview_block)
-                    logging.info("\n%s", preview_block)
-
+                token_acc, last_acc = compute_train_metrics(model, samples)
                 token_accs.append(token_acc.item())
                 last_accs.append(last_acc.item())
                 pbar.set_description(
