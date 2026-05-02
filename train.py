@@ -563,6 +563,42 @@ def move_batch_to_device(batch, device):
             moved[key] = value
     return moved
 
+def compute_train_reporting_stats(model, samples):
+    """
+    Run the train-side reporting forward pass in eval mode so debug metrics
+    and previews do not perturb dropout/stateful layers used by optimization.
+    """
+    was_training = model.training
+    if was_training:
+        model.eval()
+    try:
+        with torch.no_grad():
+            logits = model.logits(
+                samples["input_ids"],
+                samples["attention_mask"],
+                samples["prev_outputs"]
+            )
+            pred = logits.argmax(dim=-1)
+
+            target = samples["target"]
+            mask = samples["mask"]
+
+            correct = (pred == target) & mask.bool()
+            token_acc = correct.sum().float() / mask.sum().float()
+
+            lengths = mask.sum(dim=1).long()
+            last_idx = lengths - 2
+            batch_indices = torch.arange(pred.size(0), device=pred.device)
+
+            pred_last = pred[batch_indices, last_idx]
+            target_last = target[batch_indices, last_idx]
+            last_acc = (pred_last == target_last).float().mean()
+    finally:
+        if was_training:
+            model.train()
+
+    return logits, pred, last_idx, token_acc, last_acc
+
 def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=None, split_name="eval"):
     model.eval()
     beam_size = args.beam_size
@@ -1306,43 +1342,21 @@ def train(args):
                 steps += 1
                 losses.append(loss.item())
 
-                with torch.no_grad():
-                    logits = model.logits(
-                        samples["input_ids"],
-                        samples["attention_mask"],
-                        samples["prev_outputs"]
+                logits, pred, last_idx, token_acc, last_acc = compute_train_reporting_stats(model, samples)
+
+                if args.train_preview_count > 0 and (batch_idx == 0 or steps % max(1, args.train_preview_interval) == 0):
+                    preview_block = build_train_preview(
+                        samples,
+                        pred,
+                        logits,
+                        last_idx,
+                        train_set,
+                        train_preview_rev_dict,
+                        args,
+                        steps
                     )
-
-                    pred = logits.argmax(dim=-1)
-
-                    target = samples["target"]
-                    mask = samples["mask"]
-
-                    correct = (pred == target) & mask.bool()
-                    token_acc = correct.sum().float() / mask.sum().float()
-
-                    lengths = mask.sum(dim=1).long()
-                    last_idx = lengths - 2
-                    batch_indices = torch.arange(pred.size(0), device=pred.device)
-
-                    pred_last = pred[batch_indices, last_idx]
-                    target_last = target[batch_indices, last_idx]
-
-                    last_acc = (pred_last == target_last).float().mean()
-
-                    if args.train_preview_count > 0 and (batch_idx == 0 or steps % max(1, args.train_preview_interval) == 0):
-                        preview_block = build_train_preview(
-                            samples,
-                            pred,
-                            logits,
-                            last_idx,
-                            train_set,
-                            train_preview_rev_dict,
-                            args,
-                            steps
-                        )
-                        write_tqdm_block(preview_block)
-                        logging.info("\n%s", preview_block)
+                    write_tqdm_block(preview_block)
+                    logging.info("\n%s", preview_block)
 
                 token_accs.append(token_acc.item())
                 last_accs.append(last_acc.item())
