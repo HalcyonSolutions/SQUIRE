@@ -320,6 +320,147 @@ def _collect_direct_vocab_tokens(data_path, dataframe):
     reverse_relations = {_reverse_relation_token(relation) for relation in relations}
     return entities, relations, reverse_relations
 
+
+def _add_entity_label_mapping(container, entity_token, label):
+    entity_token = str(entity_token)
+    label_text = _normalize_label_text(label)
+    if label_text is None:
+        return
+    container.label2entity_ids.setdefault(label_text, [])
+    if entity_token not in container.label2entity_ids[label_text]:
+        container.label2entity_ids[label_text].append(entity_token)
+
+
+def _add_direct_id_entity(container, token, label=None):
+    token = str(token)
+    if not _is_wikidata_entity(token):
+        return
+    container.entity2id[token] = token
+    label_text = _normalize_label_text(label)
+    if label_text is not None:
+        container.id2entity[token] = label_text
+    else:
+        container.id2entity.setdefault(token, token)
+    _add_entity_label_mapping(container, token, label_text)
+
+
+def _add_direct_id_relation(container, token, label=None):
+    token = str(token)
+    if not _is_wikidata_relation(token):
+        return
+    container.relation2id[token] = token
+    label_text = _normalize_label_text(label)
+    if label_text is not None:
+        container.id2relation[token] = label_text
+    else:
+        container.id2relation.setdefault(token, token)
+
+    rev_token = _reverse_relation_token(token)
+    container.relation2id.setdefault(rev_token, rev_token)
+    reverse_label = f"{container.id2relation[token]} (reverse)"
+    if label_text is not None:
+        container.id2relation[rev_token] = reverse_label
+    else:
+        container.id2relation.setdefault(rev_token, reverse_label)
+
+
+def _load_direct_id_mappings(container):
+    container.relation2id = {}
+    container.id2relation = {}
+
+    for _, row in container.data.iterrows():
+        for entity_token, label in _iter_row_entity_label_pairs(row):
+            _add_direct_id_entity(container, entity_token, label)
+
+        try:
+            paths = _parse_paths_cell(row.get("Paths"))
+        except (ValueError, SyntaxError):
+            paths = []
+        try:
+            path_labels = _parse_paths_cell(row.get("Paths-Label"))
+        except (ValueError, SyntaxError):
+            path_labels = []
+
+        if not isinstance(paths, list):
+            continue
+        if not isinstance(path_labels, list):
+            path_labels = []
+
+        for i, hop in enumerate(paths):
+            if not isinstance(hop, (list, tuple)) or len(hop) < 3:
+                continue
+            label_hop = path_labels[i] if i < len(path_labels) else ()
+            if not isinstance(label_hop, (list, tuple)):
+                label_hop = ()
+            _add_direct_id_entity(container, hop[0], label_hop[0] if len(label_hop) > 0 else None)
+            _add_direct_id_relation(container, hop[1], label_hop[1] if len(label_hop) > 1 else None)
+            _add_direct_id_entity(container, hop[2], label_hop[2] if len(label_hop) > 2 else None)
+
+    for _, row in container.data.iterrows():
+        for token in _normalize_list_like_cell(row.get("Source-Entity")) + _get_row_answer_entities(row):
+            _add_direct_id_entity(container, token)
+
+    if "Paths" not in container.data.columns:
+        return
+
+    for value in container.data["Paths"]:
+        try:
+            paths = _parse_paths_cell(value)
+        except (ValueError, SyntaxError):
+            continue
+        if not isinstance(paths, list):
+            continue
+        tgt_line = _flatten_path_hops(paths)
+        for i, token in enumerate(tgt_line):
+            if i % 2 == 0:
+                _add_direct_id_entity(container, token)
+            else:
+                _add_direct_id_relation(container, token)
+
+
+def _load_standard_mappings(container):
+    with open(container.data_path + "entity2id.txt") as f:
+        for line in f:
+            e, eid = line.strip().split('\t')
+            container.entity2id[e] = eid
+            container.id2entity[eid] = e
+
+    container.relation2id = {}
+    container.id2relation = {}
+    relation_rows = []
+    with open(container.data_path + "relation2id.txt") as f:
+        for line in f:
+            r, rid = line.strip().split('\t')
+            relation_rows.append((r, rid))
+    num_relations = len(relation_rows)
+    for r, rid in relation_rows:
+        container.relation2id[r] = 'R' + rid
+        container.id2relation["R" + rid] = r
+        container.id2relation["R" + str(int(rid) + num_relations)] = f"{r} (reverse)"
+
+    for _, row in container.data.iterrows():
+        for entity_token, label in _iter_row_entity_label_pairs(row):
+            if entity_token in container.entity2id:
+                _add_entity_label_mapping(container, entity_token, label)
+
+
+def _load_raw_triples_into_valid_dict(container, file_name, valid_dict, vocab_size, eos):
+    path = os.path.join(container.data_path, file_name)
+    if not os.path.exists(path):
+        return
+    with open(path, 'r') as f:
+        for line in tqdm(f):
+            parts = line.strip().split('\t')
+            if len(parts) != 3:
+                continue
+            h, r, t = (str(part) for part in parts)
+            if h not in container.dictionary.indices or r not in container.dictionary.indices or t not in container.dictionary.indices:
+                continue
+            container._add_valid_triple(valid_dict, h, r, t, vocab_size, eos)
+            rev_r = _reverse_relation_token(r)
+            if rev_r in container.dictionary.indices:
+                container._add_valid_triple(valid_dict, t, rev_r, h, vocab_size, eos)
+
 class Seq2SeqDataset(Dataset):
     _tokenizer = None
 
@@ -392,128 +533,11 @@ class Seq2SeqDataset(Dataset):
         self.id2entity = {}
         self.label2entity_ids = {}
 
-        def add_entity_label_mapping(entity_token, label):
-            entity_token = str(entity_token)
-            label_text = _normalize_label_text(label)
-            if label_text is None:
-                return
-            self.label2entity_ids.setdefault(label_text, [])
-            if entity_token not in self.label2entity_ids[label_text]:
-                self.label2entity_ids[label_text].append(entity_token)
-
         if self.direct_id_mode:
-            self.relation2id = {}
-            self.id2relation = {}
-
-            def add_entity(token, label=None):
-                token = str(token)
-                if not _is_wikidata_entity(token):
-                    return
-                self.entity2id[token] = token
-                label_text = _normalize_label_text(label)
-                if label_text is not None:
-                    self.id2entity[token] = label_text
-                else:
-                    self.id2entity.setdefault(token, token)
-                add_entity_label_mapping(token, label_text)
-
-            def add_relation(token, label=None):
-                token = str(token)
-                if not _is_wikidata_relation(token):
-                    return
-                self.relation2id[token] = token
-                label_text = _normalize_label_text(label)
-                if label_text is not None:
-                    self.id2relation[token] = label_text
-                else:
-                    self.id2relation.setdefault(token, token)
-
-                rev_token = _reverse_relation_token(token)
-                self.relation2id.setdefault(rev_token, rev_token)
-                reverse_label = f"{self.id2relation[token]} (reverse)"
-                if label_text is not None:
-                    self.id2relation[rev_token] = reverse_label
-                else:
-                    self.id2relation.setdefault(rev_token, reverse_label)
-
-            for _, row in self.data.iterrows():
-                for entity_token, label in _iter_row_entity_label_pairs(row):
-                    add_entity(entity_token, label)
-
-                try:
-                    paths = _parse_paths_cell(row.get("Paths"))
-                except (ValueError, SyntaxError):
-                    paths = []
-                try:
-                    path_labels = _parse_paths_cell(row.get("Paths-Label"))
-                except (ValueError, SyntaxError):
-                    path_labels = []
-
-                if not isinstance(paths, list):
-                    continue
-                if not isinstance(path_labels, list):
-                    path_labels = []
-
-                for i, hop in enumerate(paths):
-                    if not isinstance(hop, (list, tuple)) or len(hop) < 3:
-                        continue
-                    label_hop = path_labels[i] if i < len(path_labels) else ()
-                    if not isinstance(label_hop, (list, tuple)):
-                        label_hop = ()
-                    add_entity(hop[0], label_hop[0] if len(label_hop) > 0 else None)
-                    add_relation(hop[1], label_hop[1] if len(label_hop) > 1 else None)
-                    add_entity(hop[2], label_hop[2] if len(label_hop) > 2 else None)
-
-            for _, row in self.data.iterrows():
-                for token in _normalize_list_like_cell(row.get("Source-Entity")) + _get_row_answer_entities(row):
-                    if _is_wikidata_entity(token):
-                        self.entity2id[token] = token
-                        self.id2entity.setdefault(token, token)
-
-            if "Paths" in self.data.columns:
-                for value in self.data["Paths"]:
-                    try:
-                        paths = _parse_paths_cell(value)
-                    except (ValueError, SyntaxError):
-                        continue
-                    if not isinstance(paths, list):
-                        continue
-                    tgt_line = _flatten_path_hops(paths)
-                    for i, token in enumerate(tgt_line):
-                        if i % 2 == 0 and _is_wikidata_entity(token):
-                            self.entity2id[token] = token
-                            self.id2entity.setdefault(token, token)
-                        elif i % 2 == 1 and _is_wikidata_relation(token):
-                            self.relation2id[token] = token
-                            self.id2relation.setdefault(token, token)
-                            rev_token = _reverse_relation_token(token)
-                            self.relation2id.setdefault(rev_token, rev_token)
-                            self.id2relation.setdefault(rev_token, f"{self.id2relation[token]} (reverse)")
+            _load_direct_id_mappings(self)
             return
 
-        with open(self.data_path + "entity2id.txt") as f:
-            for line in f:
-                e, eid = line.strip().split('\t')
-                self.entity2id[e] = eid
-                self.id2entity[eid] = e
-
-        self.relation2id = {}
-        self.id2relation = {}
-        relation_rows = []
-        with open(self.data_path + "relation2id.txt") as f:
-            for line in f:
-                r, rid = line.strip().split('\t')
-                relation_rows.append((r, rid))
-        num_relations = len(relation_rows)
-        for r, rid in relation_rows:
-            self.relation2id[r] = 'R' + rid
-            self.id2relation["R" + rid] = r
-            self.id2relation["R" + str(int(rid) + num_relations)] = f"{r} (reverse)"
-
-        for _, row in self.data.iterrows():
-            for entity_token, label in _iter_row_entity_label_pairs(row):
-                if entity_token in self.entity2id:
-                    add_entity_label_mapping(entity_token, label)
+        _load_standard_mappings(self)
 
     def __getitem__(self, index):
         row = self.data.iloc[index]
@@ -638,28 +662,11 @@ class Seq2SeqDataset(Dataset):
             vocab_size = len(self.dictionary)
             eos = self.dictionary.eos()
 
-            def add_raw_triples(file_name, valid_dict):
-                path = os.path.join(self.data_path, file_name)
-                if not os.path.exists(path):
-                    return
-                with open(path, 'r') as f:
-                    for line in tqdm(f):
-                        parts = line.strip().split('\t')
-                        if len(parts) != 3:
-                            continue
-                        h, r, t = (str(part) for part in parts)
-                        if h not in self.dictionary.indices or r not in self.dictionary.indices or t not in self.dictionary.indices:
-                            continue
-                        self._add_valid_triple(valid_dict, h, r, t, vocab_size, eos)
-                        rev_r = _reverse_relation_token(r)
-                        if rev_r in self.dictionary.indices:
-                            self._add_valid_triple(valid_dict, t, rev_r, h, vocab_size, eos)
-
             train_file = "train.txt" if os.path.exists(os.path.join(self.data_path, "train.txt")) else "triplets.txt"
-            add_raw_triples(train_file, train_valid)
-            add_raw_triples(train_file, eval_valid)
-            add_raw_triples("valid.txt", eval_valid)
-            add_raw_triples("test.txt", eval_valid)
+            _load_raw_triples_into_valid_dict(self, train_file, train_valid, vocab_size, eos)
+            _load_raw_triples_into_valid_dict(self, train_file, eval_valid, vocab_size, eos)
+            _load_raw_triples_into_valid_dict(self, "valid.txt", eval_valid, vocab_size, eos)
+            _load_raw_triples_into_valid_dict(self, "test.txt", eval_valid, vocab_size, eos)
             return train_valid, eval_valid
 
         train_valid = dict()
@@ -998,128 +1005,11 @@ class Seq2SeqDataset_MetaQA(Dataset):
         self.id2entity = {}
         self.label2entity_ids = {}
 
-        def add_entity_label_mapping(entity_token, label):
-            entity_token = str(entity_token)
-            label_text = _normalize_label_text(label)
-            if label_text is None:
-                return
-            self.label2entity_ids.setdefault(label_text, [])
-            if entity_token not in self.label2entity_ids[label_text]:
-                self.label2entity_ids[label_text].append(entity_token)
-
         if self.direct_id_mode:
-            self.relation2id = {}
-            self.id2relation = {}
-
-            def add_entity(token, label=None):
-                token = str(token)
-                if not _is_wikidata_entity(token):
-                    return
-                self.entity2id[token] = token
-                label_text = _normalize_label_text(label)
-                if label_text is not None:
-                    self.id2entity[token] = label_text
-                else:
-                    self.id2entity.setdefault(token, token)
-                add_entity_label_mapping(token, label_text)
-
-            def add_relation(token, label=None):
-                token = str(token)
-                if not _is_wikidata_relation(token):
-                    return
-                self.relation2id[token] = token
-                label_text = _normalize_label_text(label)
-                if label_text is not None:
-                    self.id2relation[token] = label_text
-                else:
-                    self.id2relation.setdefault(token, token)
-
-                rev_token = _reverse_relation_token(token)
-                self.relation2id.setdefault(rev_token, rev_token)
-                reverse_label = f"{self.id2relation[token]} (reverse)"
-                if label_text is not None:
-                    self.id2relation[rev_token] = reverse_label
-                else:
-                    self.id2relation.setdefault(rev_token, reverse_label)
-
-            for _, row in self.data.iterrows():
-                for entity_token, label in _iter_row_entity_label_pairs(row):
-                    add_entity(entity_token, label)
-
-                try:
-                    paths = _parse_paths_cell(row.get("Paths"))
-                except (ValueError, SyntaxError):
-                    paths = []
-                try:
-                    path_labels = _parse_paths_cell(row.get("Paths-Label"))
-                except (ValueError, SyntaxError):
-                    path_labels = []
-
-                if not isinstance(paths, list):
-                    continue
-                if not isinstance(path_labels, list):
-                    path_labels = []
-
-                for i, hop in enumerate(paths):
-                    if not isinstance(hop, (list, tuple)) or len(hop) < 3:
-                        continue
-                    label_hop = path_labels[i] if i < len(path_labels) else ()
-                    if not isinstance(label_hop, (list, tuple)):
-                        label_hop = ()
-                    add_entity(hop[0], label_hop[0] if len(label_hop) > 0 else None)
-                    add_relation(hop[1], label_hop[1] if len(label_hop) > 1 else None)
-                    add_entity(hop[2], label_hop[2] if len(label_hop) > 2 else None)
-
-            for _, row in self.data.iterrows():
-                for token in _normalize_list_like_cell(row.get("Source-Entity")) + _get_row_answer_entities(row):
-                    if _is_wikidata_entity(token):
-                        self.entity2id[token] = token
-                        self.id2entity.setdefault(token, token)
-
-            if "Paths" in self.data.columns:
-                for value in self.data["Paths"]:
-                    try:
-                        paths = _parse_paths_cell(value)
-                    except (ValueError, SyntaxError):
-                        continue
-                    if not isinstance(paths, list):
-                        continue
-                    tgt_line = _flatten_path_hops(paths)
-                    for i, token in enumerate(tgt_line):
-                        if i % 2 == 0 and _is_wikidata_entity(token):
-                            self.entity2id[token] = token
-                            self.id2entity.setdefault(token, token)
-                        elif i % 2 == 1 and _is_wikidata_relation(token):
-                            self.relation2id[token] = token
-                            self.id2relation.setdefault(token, token)
-                            rev_token = _reverse_relation_token(token)
-                            self.relation2id.setdefault(rev_token, rev_token)
-                            self.id2relation.setdefault(rev_token, f"{self.id2relation[token]} (reverse)")
+            _load_direct_id_mappings(self)
             return
 
-        with open(self.data_path + "entity2id.txt") as f:
-            for line in f:
-                e, eid = line.strip().split('\t')
-                self.entity2id[e] = eid
-                self.id2entity[eid] = e
-
-        self.relation2id = {}
-        self.id2relation = {}
-        relation_rows = []
-        with open(self.data_path + "relation2id.txt") as f:
-            for line in f:
-                r, rid = line.strip().split('\t')
-                relation_rows.append((r, rid))
-        num_relations = len(relation_rows)
-        for r, rid in relation_rows:
-            self.relation2id[r] = 'R' + rid
-            self.id2relation["R" + rid] = r
-            self.id2relation["R" + str(int(rid) + num_relations)] = f"{r} (reverse)"
-
-        for _, row in self.data.iterrows():
-            for entity_token, label in _iter_row_entity_label_pairs(row):
-                if entity_token in self.entity2id:
-                    add_entity_label_mapping(entity_token, label)
+        _load_standard_mappings(self)
 
     def __getitem__(self, index):
         row = self.data.iloc[index]
@@ -1200,28 +1090,11 @@ class Seq2SeqDataset_MetaQA(Dataset):
             vocab_size = len(self.dictionary)
             eos = self.dictionary.eos()
 
-            def add_raw_triples(file_name, valid_dict):
-                path = os.path.join(self.data_path, file_name)
-                if not os.path.exists(path):
-                    return
-                with open(path, 'r') as f:
-                    for line in tqdm(f):
-                        parts = line.strip().split('\t')
-                        if len(parts) != 3:
-                            continue
-                        h, r, t = (str(part) for part in parts)
-                        if h not in self.dictionary.indices or r not in self.dictionary.indices or t not in self.dictionary.indices:
-                            continue
-                        self._add_valid_triple(valid_dict, h, r, t, vocab_size, eos)
-                        rev_r = _reverse_relation_token(r)
-                        if rev_r in self.dictionary.indices:
-                            self._add_valid_triple(valid_dict, t, rev_r, h, vocab_size, eos)
-
             train_file = "train.txt" if os.path.exists(os.path.join(self.data_path, "train.txt")) else "triplets.txt"
-            add_raw_triples(train_file, train_valid)
-            add_raw_triples(train_file, eval_valid)
-            add_raw_triples("valid.txt", eval_valid)
-            add_raw_triples("test.txt", eval_valid)
+            _load_raw_triples_into_valid_dict(self, train_file, train_valid, vocab_size, eos)
+            _load_raw_triples_into_valid_dict(self, train_file, eval_valid, vocab_size, eos)
+            _load_raw_triples_into_valid_dict(self, "valid.txt", eval_valid, vocab_size, eos)
+            _load_raw_triples_into_valid_dict(self, "test.txt", eval_valid, vocab_size, eos)
             return train_valid, eval_valid
 
         train_valid = dict()
