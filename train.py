@@ -1273,26 +1273,6 @@ def train(args):
     warmup_steps = total_step_num / args.warmup
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, total_step_num)
     
-    #! iterative training isn't tested
-    # if args.iter: 
-    #     iter_trainer = Iter_trainer(args.dataset, args.iter_batch_size, 32, 4)
-    #     iter_epoch = []
-    #     max_len = args.max_len
-    #     total = 0
-    #     for i in range(1, max_len+1):
-    #         total += (1/i)
-    #     epochs = 0
-    #     for i in range(1, max_len+1):
-    #         iter_epoch.append(int(args.num_epoch/(total*i)))
-    #         epochs += int(args.num_epoch/(total*i))
-    #     iter_epoch[-1] += (args.num_epoch-epochs)
-    #     curr_iter = -1
-    #     curr_iter_epoch = 0
-    #     logging.info(
-    #                 "[Iter0: %d] [Iter1: %d] [Iter2: %d]"
-    #                 % (iter_epoch[0], iter_epoch[1], iter_epoch[2])
-    #                 )
-
     best_hit1 = -float("inf")
     best_epoch = -1
     metric_history = {
@@ -1310,27 +1290,6 @@ def train(args):
     }
     steps = 0
     for epoch in range(args.num_epoch):
-
-        #! iterative training isn't tested
-        # if args.iter:
-        #     if curr_iter_epoch == 0: # start next iteration
-        #         curr_iter += 1
-        #         curr_iter_epoch = iter_epoch[curr_iter]
-        #         # label new dataset
-        #         if curr_iter > 0:
-        #             logging.info("--------Iterating--------")
-        #             (src_lines, tgt_lines) = iter_trainer.get_iter(model, curr_iter)
-        #             train_set.src_lines += src_lines
-        #             train_set.tgt_lines += tgt_lines
-        #             train_loader = DataLoader(train_set, batch_size=args.batch_size, collate_fn=train_set.collate_fn, shuffle=True)
-        #         # new scheduler
-        #         step_num = len(train_loader) * curr_iter_epoch
-        #         warmup_steps = step_num / args.warmup
-        #         if curr_iter != 0:
-        #             optimizer = optim.Adam(model.parameters(), lr=args.lr / 5, weight_decay=args.weight_decay) # fine-tuning with smaller lr
-        #             warmup_steps = 0
-        #         scheduler = transformers.get_linear_schedule_with_warmup(optimizer, warmup_steps, step_num)
-        #     curr_iter_epoch -= 1
 
         model.train()
         with tqdm(train_loader, desc="training") as pbar:
