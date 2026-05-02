@@ -3,7 +3,7 @@ import os
 
 import torch
 
-from scripts.build_multi_answer_paths import (
+from build_multi_answer_paths import (
     build_relation_index,
     convert_multi_answer_csv,
     find_path_for_relation_sequence,
