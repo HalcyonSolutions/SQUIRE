@@ -537,6 +537,12 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
     np.random.seed(worker_seed)
 
+def count_parameters(model):
+    """Count total and trainable parameters in a PyTorch model."""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total_params, trainable_params
+
 def build_dataloader_generator(seed):
     generator = torch.Generator()
     generator.manual_seed(seed)
@@ -1471,6 +1477,14 @@ def checkpoint(args):
     model.load_state_dict(torch.load(os.path.join(ckpt_path, args.ckpt)))
     model.args = args
     model = model.to(device)
+    
+    # Count and print model parameters
+    total_params, trainable_params = count_parameters(model)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(".2f")
+    print(".2f")
+    
     with torch.no_grad():
         evaluate(model, test_loader, device, args, train_valid, eval_valid, split_name="test")
     
