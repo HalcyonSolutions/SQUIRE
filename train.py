@@ -462,6 +462,119 @@ def compute_train_metrics(model, samples):
 
     return token_acc, last_acc
 
+def build_relation_name_to_id(dataset, rev_dict):
+    relation_name_to_id = {}
+    if dataset is None or not hasattr(dataset, "id2relation"):
+        return relation_name_to_id
+
+    for token_id, symbol in rev_dict.items():
+        if symbol in dataset.id2relation:
+            relation_name_to_id[dataset.id2relation[symbol]] = token_id
+    return relation_name_to_id
+
+def build_inverse_relation_mapping(relation_name_to_id):
+    inverse_mapping = {}
+    for relation_name, token_id in relation_name_to_id.items():
+        if relation_name.endswith(" (reverse)"):
+            base_name = relation_name[: -len(" (reverse)")]
+            if base_name in relation_name_to_id:
+                inverse_mapping[token_id] = relation_name_to_id[base_name]
+    return inverse_mapping
+
+def row_path_token_to_id(token, is_relation, dictionary_indices, dataset, relation_name_to_id):
+    token = str(token)
+    if token in dictionary_indices:
+        return dictionary_indices[token]
+    if dataset is None:
+        return None
+    if is_relation and token in relation_name_to_id:
+        return relation_name_to_id[token]
+    if is_relation and hasattr(dataset, "relation2id") and token in dataset.relation2id:
+        mapped = dataset.relation2id[token]
+        return dictionary_indices.get(mapped)
+    if (not is_relation) and hasattr(dataset, "entity2id") and token in dataset.entity2id:
+        mapped = dataset.entity2id[token]
+        return dictionary_indices.get(mapped)
+    return None
+
+def row_to_gt_edges(row, dictionary_indices, dataset, relation_name_to_id, bos, eos):
+    if row is None:
+        return []
+    gt_paths = parse_optional_literal(row.get("Paths"))
+    if not isinstance(gt_paths, list) or not gt_paths:
+        gt_paths = parse_optional_literal(row.get("Paths-Label"))
+    if not isinstance(gt_paths, list) or not gt_paths:
+        return []
+
+    gt_path_tokens = [bos]
+    for hop_idx, hop in enumerate(gt_paths):
+        if not isinstance(hop, (list, tuple)) or len(hop) < 3:
+            continue
+        h_id = row_path_token_to_id(hop[0], is_relation=False, dictionary_indices=dictionary_indices, dataset=dataset, relation_name_to_id=relation_name_to_id)
+        r_id = row_path_token_to_id(hop[1], is_relation=True, dictionary_indices=dictionary_indices, dataset=dataset, relation_name_to_id=relation_name_to_id)
+        t_id = row_path_token_to_id(hop[2], is_relation=False, dictionary_indices=dictionary_indices, dataset=dataset, relation_name_to_id=relation_name_to_id)
+        if h_id is None or r_id is None or t_id is None:
+            continue
+        if hop_idx == 0:
+            gt_path_tokens.extend([h_id, r_id, t_id])
+        else:
+            gt_path_tokens.extend([r_id, t_id])
+    gt_path_tokens.append(eos)
+    return path_tokens_to_edges(gt_path_tokens, eos, bos)
+
+def row_to_gt_relations(row, dictionary_indices, dataset, relation_name_to_id):
+    if row is None:
+        return []
+    relation_tokens = get_row_relation_sequence(
+        row,
+        ("Path-Key", "Path_Key", "Query-Relations", "Query-Relation"),
+    )
+    if not relation_tokens:
+        gt_paths = parse_optional_literal(row.get("Paths"))
+        if not isinstance(gt_paths, list) or not gt_paths:
+            gt_paths = parse_optional_literal(row.get("Paths-Label"))
+        if isinstance(gt_paths, list):
+            relation_tokens = [
+                str(hop[1]).strip()
+                for hop in gt_paths
+                if isinstance(hop, (list, tuple)) and len(hop) >= 2 and str(hop[1]).strip()
+            ]
+    relation_ids = []
+    for relation in relation_tokens:
+        relation_id = row_path_token_to_id(
+            relation,
+            is_relation=True,
+            dictionary_indices=dictionary_indices,
+            dataset=dataset,
+            relation_name_to_id=relation_name_to_id,
+        )
+        if relation_id is not None:
+            relation_ids.append(relation_id)
+    return relation_ids
+
+def row_to_hop_count(row):
+    if row is None:
+        return None
+    for column_name in ("Hops", "Num-Hops", "N-Hop", "hop", "num_hops"):
+        if column_name not in row.index:
+            continue
+        hop_value = row.get(column_name)
+        if hop_value is None or (isinstance(hop_value, float) and math.isnan(hop_value)):
+            continue
+        if isinstance(hop_value, (int, np.integer)):
+            return int(hop_value)
+        if isinstance(hop_value, float):
+            return int(hop_value)
+        hop_digits = "".join(ch for ch in str(hop_value) if ch.isdigit())
+        if hop_digits:
+            return int(hop_digits)
+    gt_paths = parse_optional_literal(row.get("Paths"))
+    if not isinstance(gt_paths, list) or not gt_paths:
+        gt_paths = parse_optional_literal(row.get("Paths-Label"))
+    if isinstance(gt_paths, list) and gt_paths:
+        return len(gt_paths)
+    return None
+
 def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=None, split_name="eval"):
     model.eval()
     beam_size = args.beam_size
@@ -472,6 +585,7 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     vocab_size = len(model.dictionary)
     eos = model.dictionary.eos()
     bos = model.dictionary.bos()
+    dictionary_indices = model.dictionary.indices
     rev_dict = {v: k for k, v in model.dictionary.indices.items()}
     lines = []
     dataset = getattr(dataloader, "dataset", None)
@@ -493,108 +607,11 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         for hop in (2, 3, 4)
     }
     special_tokens = {bos, eos, model.dictionary.pad()}
-    loop_token = model.dictionary.indices.get("LOOP")
+    loop_token = dictionary_indices.get("LOOP")
     if loop_token is not None:
         special_tokens.add(loop_token)
-    inverse_mapping = {}
-    relation_name_to_id = {}
-    if dataset is not None and hasattr(dataset, "id2relation"):
-        for token_id, symbol in rev_dict.items():
-            if symbol in dataset.id2relation:
-                relation_name_to_id[dataset.id2relation[symbol]] = token_id
-        for relation_name, token_id in relation_name_to_id.items():
-            if relation_name.endswith(" (reverse)"):
-                base_name = relation_name[: -len(" (reverse)")]
-                if base_name in relation_name_to_id:
-                    inverse_mapping[token_id] = relation_name_to_id[base_name]
-
-    def row_path_token_to_id(token, is_relation):
-        token = str(token)
-        if token in model.dictionary.indices:
-            return model.dictionary.indices[token]
-        if dataset is None:
-            return None
-        if is_relation and token in relation_name_to_id:
-            return relation_name_to_id[token]
-        if is_relation and hasattr(dataset, "relation2id") and token in dataset.relation2id:
-            mapped = dataset.relation2id[token]
-            return model.dictionary.indices.get(mapped)
-        if (not is_relation) and hasattr(dataset, "entity2id") and token in dataset.entity2id:
-            mapped = dataset.entity2id[token]
-            return model.dictionary.indices.get(mapped)
-        return None
-
-    def row_to_gt_edges(row):
-        if row is None:
-            return []
-        gt_paths = parse_optional_literal(row.get("Paths"))
-        if not isinstance(gt_paths, list) or not gt_paths:
-            gt_paths = parse_optional_literal(row.get("Paths-Label"))
-        if not isinstance(gt_paths, list) or not gt_paths:
-            return []
-
-        gt_path_tokens = [bos]
-        for hop_idx, hop in enumerate(gt_paths):
-            if not isinstance(hop, (list, tuple)) or len(hop) < 3:
-                continue
-            h_id = row_path_token_to_id(hop[0], is_relation=False)
-            r_id = row_path_token_to_id(hop[1], is_relation=True)
-            t_id = row_path_token_to_id(hop[2], is_relation=False)
-            if h_id is None or r_id is None or t_id is None:
-                continue
-            if hop_idx == 0:
-                gt_path_tokens.extend([h_id, r_id, t_id])
-            else:
-                gt_path_tokens.extend([r_id, t_id])
-        gt_path_tokens.append(eos)
-        return path_tokens_to_edges(gt_path_tokens, eos, bos)
-
-    def row_to_gt_relations(row):
-        if row is None:
-            return []
-        relation_tokens = get_row_relation_sequence(
-            row,
-            ("Path-Key", "Path_Key", "Query-Relations", "Query-Relation"),
-        )
-        if not relation_tokens:
-            gt_paths = parse_optional_literal(row.get("Paths"))
-            if not isinstance(gt_paths, list) or not gt_paths:
-                gt_paths = parse_optional_literal(row.get("Paths-Label"))
-            if isinstance(gt_paths, list):
-                relation_tokens = [
-                    str(hop[1]).strip()
-                    for hop in gt_paths
-                    if isinstance(hop, (list, tuple)) and len(hop) >= 2 and str(hop[1]).strip()
-                ]
-        relation_ids = []
-        for relation in relation_tokens:
-            relation_id = row_path_token_to_id(relation, is_relation=True)
-            if relation_id is not None:
-                relation_ids.append(relation_id)
-        return relation_ids
-
-    def row_to_hop_count(row):
-        if row is None:
-            return None
-        for column_name in ("Hops", "Num-Hops", "N-Hop", "hop", "num_hops"):
-            if column_name not in row.index:
-                continue
-            hop_value = row.get(column_name)
-            if hop_value is None or (isinstance(hop_value, float) and math.isnan(hop_value)):
-                continue
-            if isinstance(hop_value, (int, np.integer)):
-                return int(hop_value)
-            if isinstance(hop_value, float):
-                return int(hop_value)
-            hop_digits = "".join(ch for ch in str(hop_value) if ch.isdigit())
-            if hop_digits:
-                return int(hop_digits)
-        gt_paths = parse_optional_literal(row.get("Paths"))
-        if not isinstance(gt_paths, list) or not gt_paths:
-            gt_paths = parse_optional_literal(row.get("Paths-Label"))
-        if isinstance(gt_paths, list) and gt_paths:
-            return len(gt_paths)
-        return None
+    relation_name_to_id = build_relation_name_to_id(dataset, rev_dict)
+    inverse_mapping = build_inverse_relation_mapping(relation_name_to_id)
 
     with tqdm(dataloader, desc=f"{split_label} Eval") as pbar:
         for samples in pbar:
@@ -762,8 +779,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 hop_count = row_to_hop_count(row)
                 pred_edges = path_tokens_to_edges(candidate_path[0], eos, bos) if candidate_path else []
                 pred_relations = path_tokens_to_relations(candidate_path[0], eos, bos) if candidate_path else []
-                gt_edges = row_to_gt_edges(row)
-                gt_relations = row_to_gt_relations(row)
+                gt_edges = row_to_gt_edges(row, dictionary_indices, dataset, relation_name_to_id, bos, eos)
+                gt_relations = row_to_gt_relations(row, dictionary_indices, dataset, relation_name_to_id)
                 answer_set_topk = max(1, args.answer_set_topk)
                 predicted_endpoints = candidate_ids[:answer_set_topk]
                 _, _, answer_f1 = answer_set_f1(predicted_endpoints, gold_answers)
