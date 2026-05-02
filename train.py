@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader
@@ -15,8 +14,6 @@ from tqdm import tqdm
 import logging
 import ast
 import transformers
-import pandas as pd
-from iterative_training import Iter_trainer
 import math
 import matplotlib
 from typing import Set, Tuple, Sequence, Dict
@@ -66,11 +63,6 @@ def get_args():
     parser.add_argument("--eval-question-file", default=None, type=str, help="question CSV used by TestDataset for validation and test evaluation")
     parser.add_argument("--max-q-len", default=32, type=int, help="maximum number of tokens for the question") # used for Bert
     parser.add_argument("--num-workers", default=0, type=int, help="number of DataLoader worker processes, CPU-only when > 0; set to 0 to disable multiprocessing")
-    parser.add_argument("--eval-preview-count", default=0, type=int, help="number of readable evaluation examples to print per split; set to 0 to disable")
-    parser.add_argument("--eval-preview-topk", default=3, type=int, help="number of top predictions to show inside each evaluation preview")
-    parser.add_argument("--train-preview-count", default=0, type=int, help="number of readable training examples to print per preview; set to 0 to disable")
-    parser.add_argument("--train-preview-interval", default=100, type=int, help="print readable training preview every N optimizer steps when enabled")
-    parser.add_argument("--train-preview-topk", default=5, type=int, help="number of top tokens to show for each previewed final answer position")
     parser.add_argument("--answer-set-topk", default=1, type=int, help="number of top ranked endpoints used for AnswerF1")
     ###
     # train paraphrased isn't used
@@ -476,16 +468,13 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
     l_punish = args.l_punish
     max_len = 2 * args.max_len + 2
     restricted_punish = -30
-    mrr, hit, hit1, hit3, hit5, hit10, f1_sg, red_sum, relation_f1_sum, path_edit_distance_sum, answer_f1_sum, answer_p_sum, answer_r_sum, count = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    mrr, hit1, hit3, hit5, hit10, f1_sg, red_sum, relation_f1_sum, path_edit_distance_sum, answer_f1_sum, count = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     vocab_size = len(model.dictionary)
     eos = model.dictionary.eos()
     bos = model.dictionary.bos()
-    rev_dict = dict()
+    rev_dict = {v: k for k, v in model.dictionary.indices.items()}
     lines = []
     dataset = getattr(dataloader, "dataset", None)
-    preview_blocks = []
-    preview_limit = max(0, getattr(args, "eval_preview_count", 0))
-    preview_topk = max(1, getattr(args, "eval_preview_topk", 1))
     split_label = split_name.title()
     hop_metrics = {
         hop: {
@@ -503,9 +492,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
         }
         for hop in (2, 3, 4)
     }
-    for k in model.dictionary.indices.keys():
-        v = model.dictionary.indices[k]
-        rev_dict[v] = k
     special_tokens = {bos, eos, model.dictionary.pad()}
     loop_token = model.dictionary.indices.get("LOOP")
     if loop_token is not None:
@@ -521,70 +507,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 base_name = relation_name[: -len(" (reverse)")]
                 if base_name in relation_name_to_id:
                     inverse_mapping[token_id] = relation_name_to_id[base_name]
-
-    # I'm aware that nested function make Code Smell
-    # For now they will stay here,
-    # they help with debugging.
-    # After I'm finished, I remove them.
-    def debug_token(token_id):
-        token_id = int(token_id)
-        return f"{token_id} ({decode_token(token_id, rev_dict, dataset)})"
-
-    def debug_path(token_ids):
-        decoded = " | ".join(decode_token(token_id, rev_dict, dataset) for token_id in token_ids)
-        return f"{token_ids} ({decoded})"
-
-    def debug_top_values(value_row, topk, use_softmax=False):
-        values = F.softmax(value_row, dim=-1) if use_softmax else value_row
-        topk = min(topk, values.size(-1))
-        top_values, top_ids = torch.topk(values, k=topk)
-        ids = top_ids.detach().cpu().tolist()
-        scores = top_values.detach().cpu().tolist()
-        return "[" + ", ".join(
-            f"({token_id}, {score:.6f}, {decode_token(token_id, rev_dict, dataset)})"
-            for token_id, score in zip(ids, scores)
-        ) + "]"
-
-    def debug_candidate_lines(candidate_scores, topk=10):
-        items = sorted(candidate_scores.items(), key=lambda item: item[1], reverse=True)[:topk]
-        if not items:
-            return ["[]"]
-        return [f"{debug_token(candidate_id)}: {score:.6f}" for candidate_id, score in items]
-
-    def debug_question(sample_id, test_paraphrased=False):
-        if dataset is not None and hasattr(dataset, "data"):
-            sample_id = int(sample_id)
-            if 0 <= sample_id < len(dataset.data):
-                if test_paraphrased:
-                    return get_row_text(dataset.data.iloc[sample_id], "Question-Paraphrased")
-                else:
-                    return get_row_text(dataset.data.iloc[sample_id], "Question")
-        return "N/A"
-
-    def debug_model_input_lines(input_ids_row, attention_mask_row, prefix_row):
-        input_ids_list = input_ids_row.detach().cpu().tolist()
-        attention_mask_list = attention_mask_row.detach().cpu().tolist()
-        prefix_list = prefix_row.detach().cpu().tolist()
-        active_len = int(attention_mask_row.detach().cpu().sum().item())
-        active_input_ids = input_ids_list[:active_len]
-        if dataset is not None and hasattr(dataset, "tokenizer"):
-            input_text = dataset.tokenizer.decode(active_input_ids, skip_special_tokens=True)
-            input_tokens = dataset.tokenizer.convert_ids_to_tokens(active_input_ids)
-        else:
-            input_text = str(active_input_ids)
-            input_tokens = active_input_ids
-        return [
-            "[Model Input]",
-            f"input_ids: {input_ids_list}",
-            f"attention_mask: {attention_mask_list}",
-            f"input interpretation: {input_text}",
-            f"input tokens: {input_tokens}",
-            f"prefix ids: {prefix_list}",
-            f"prefix interpretation: {debug_path(prefix_list)}",
-        ]
-
-    def slot_role(prefix_idx):
-        return "HEAD/ENTITY" if prefix_idx % 2 == 1 else "RELATION/EOS"
 
     def row_path_token_to_id(token, is_relation):
         token = str(token)
@@ -682,30 +604,9 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 % (split_label, mrr/max(1, count), hit1/max(1, count), hit3/max(1, count), hit5/max(1, count), hit10/max(1, count), f1_sg/max(1, count), red_sum/max(1, count), relation_f1_sum/max(1, count), path_edit_distance_sum/max(1, count), answer_f1_sum/max(1, count))
             )
             batch_size = samples["input_ids"].size(0)
-            debug_limit = 0
-            debug_blocks = []
-            if count < 2:
-                debug_limit = min(batch_size, 2 - count)
-                for i in range(debug_limit):
-                    sample_id = samples["ids"][i].detach().cpu().tolist() if "ids" in samples else count + i
-                    head_id = samples["head_id"][i].detach().cpu().tolist()
-                    target_id = samples["target"][i].detach().cpu().view(-1)[0].tolist()
-                    gold_answer_ids = normalize_gold_answer_ids(
-                        samples["gold_answers"][i] if "gold_answers" in samples else None,
-                        target_id,
-                    )
-                    debug_blocks.append([
-                        "================ SAMPLE =================",
-                        "[INPUT]",
-                        f"Sample ID: {sample_id}",
-                        f"Question: {debug_question(sample_id, test_paraphrased=args.test_paraphrased)}",
-                        f"Head ID: {debug_token(head_id)}",
-                        f"Target ID: {debug_token(target_id)}",
-                        "Gold Answers: " + " | ".join(debug_token(answer_id) for answer_id in gold_answer_ids),
-                    ])
 
-            candidates = [dict() for i in range(batch_size)]
-            candidates_path = [dict() for i in range(batch_size)]
+            candidates = [dict() for _ in range(batch_size)]
+            candidates_path = [dict() for _ in range(batch_size)]
             input_ids = samples["input_ids"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
             attention_mask = samples["attention_mask"].unsqueeze(dim=1).repeat(1, beam_size, 1).to(device)
             # The question encoder input is identical for every beam in the
@@ -726,9 +627,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             tmp_attention_mask = samples["attention_mask"]
             tmp_prefix = torch.zeros([batch_size, 1], dtype=torch.long).to(device)
             tmp_prefix[:, 0].fill_(model.dictionary.bos())
-            if count < 2:
-                for i in range(debug_limit):
-                    debug_blocks[i].extend(debug_model_input_lines(tmp_input_ids[i], tmp_attention_mask[i], tmp_prefix[i]))
             logits = model.logits(
                 tmp_input_ids,
                 tmp_attention_mask,
@@ -741,25 +639,11 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
             prefix[:, :, 1] = argsort[:, :]
             lprob += torch.gather(input=logits, dim=-1, index=argsort)
             clen += 1
-            if count < 2:
-                debug_logits = logits.view(batch_size, -1)
-                for i in range(debug_limit):
-                    debug_blocks[i].extend([
-                        "[STEP 0 HEAD/ENTITY LOGITS]",
-                        "Top-10: " + debug_top_values(debug_logits[i], 10),
-                    ])
-            target = samples["target"].cpu()
             for l in range(2, max_len):
                 tmp_prefix = prefix.unsqueeze(dim=2).repeat(1, 1, beam_size, 1)
                 tmp_lprob = lprob.unsqueeze(dim=-1).repeat(1, 1, beam_size)    
                 tmp_clen = clen.unsqueeze(dim=-1).repeat(1, 1, beam_size)
                 bb = batch_size * beam_size
-                if l <= 3 and count < 2:
-                    for i in range(debug_limit):
-                        debug_blocks[i].append("[Model Input]")
-                        for j in range(min(3, beam_size)):
-                            debug_blocks[i].append(f"beam {j}:")
-                            debug_blocks[i].extend(debug_model_input_lines(input_ids[i][j], attention_mask[i][j], prefix[i][j]))
                 all_logits = model.logits(
                     input_ids.view(bb, -1),
                     attention_mask.view(bb, -1),
@@ -788,16 +672,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     idx = torch.LongTensor(true_triples[index[i][j]]).unsqueeze(0)
                                     restricted[i][j] = -restricted_punish * torch.zeros(1, vocab_size).scatter_(1, idx, 1) + restricted_punish
                     logits = F.log_softmax(logits+restricted.to(device), dim=-1)
-                if l <= 3 and count < 2:
-                    for i in range(debug_limit):
-                        debug_blocks[i].append(f"[BEAM STEP {l} | {slot_role(l)}]")
-                        debug_blocks[i].append("Current prefixes (first 3 beams):")
-                        for j in range(min(3, beam_size)):
-                            prefix_tokens = prefix[i][j, :l].detach().cpu().tolist()
-                            debug_blocks[i].append(f"beam {j}: {debug_path(prefix_tokens)}")
-                        debug_blocks[i].append("Logits top-5 for next token:")
-                        for j in range(min(3, beam_size)):
-                            debug_blocks[i].append(f"beam {j}: {debug_top_values(logits[i][j], 5)}")
                 argsort = torch.argsort(logits, dim=-1, descending=True)[:, :, :beam_size]
                 tmp_clen = tmp_clen + 1
                 tmp_prefix = tmp_prefix.scatter_(dim=-1, index=tmp_clen.unsqueeze(-1), src=argsort.unsqueeze(-1))
@@ -821,14 +695,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                             else:
                                 prob = lprob[i][j].item()
                             path_array = prefix[i][j, :l + 1].detach().cpu().numpy()
-                            if count < 2 and i < debug_limit:
-                                path_tokens = path_array.tolist()
-                                debug_blocks[i].extend([
-                                    "[COLLECT CANDIDATE]",
-                                    f"Candidate entity: {debug_token(candidate)}",
-                                    f"Score: {prob:.6f}",
-                                    f"Path: {debug_path(path_tokens)}",
-                                ])
                             lprob[i][j] -= 10000
                             if candidate not in candidates[i]:
                                 if args.self_consistency:
@@ -854,14 +720,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                             else:
                                 prob = lprob[i][j].item()
                             path_array = prefix[i][j, :candidate_pos + 1].detach().cpu().numpy()
-                            if count < 2 and i < debug_limit:
-                                path_tokens = path_array.tolist()
-                                debug_blocks[i].extend([
-                                    "[COLLECT CANDIDATE]",
-                                    f"Candidate entity: {debug_token(candidate)}",
-                                    f"Score: {prob:.6f}",
-                                    f"Path: {debug_path(path_tokens)}",
-                                ])
                             if candidate not in candidates[i]:
                                 if args.self_consistency:
                                     candidates[i][candidate] = math.exp(prob)
@@ -877,22 +735,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                                     candidates[i][candidate] = max(candidates[i][candidate], prob)
             target = samples["target"].cpu()
             for i in range(batch_size):
-                debug_sample = count < 2 and i < debug_limit
                 hid = samples["head_id"][i].item()
-                
-                #! index is irrelevant for new kinship dataset
-                #! because it doesn't have Query-Relation information
-                # index = vocab_size * rid + hid
                 index = None
-                if debug_sample:
-                    debug_gold = target[i].detach().cpu().view(-1)[0].tolist()
-                    debug_blocks[i].extend([
-                        "[BEFORE FILTER]",
-                        "Top candidates (id, score):",
-                    ])
-                    debug_blocks[i].extend(debug_candidate_lines(candidates[i]))
-                    debug_blocks[i].append(f"Gold: {debug_token(debug_gold)}")
-
                 if index is not None and index in valid_triples:
                     mask = valid_triples[index]
                     for tid in candidates[i].keys():
@@ -904,26 +748,15 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                         else:
                             if tid in mask:
                                 candidates[i][tid] -= 100000
-                if debug_sample:
-                    debug_blocks[i].extend([
-                        "[AFTER FILTER]",
-                        "Top candidates (id, score):",
-                    ])
-                    debug_blocks[i].extend(debug_candidate_lines(candidates[i]))
                 count += 1
                 candidate_ = sorted(zip(candidates[i].items(), candidates_path[i].items()), key=lambda x:x[0][1], reverse=True)
                 candidate_ids = [pair[0][0] for pair in candidate_]
                 candidate_path = [pair[1][1] for pair in candidate_]
-                if candidate_ids:
-                    candidate = torch.as_tensor(candidate_ids, dtype=torch.long)
-                else:
-                    candidate = torch.empty(0, dtype=torch.long)
                 target_id = target[i].item()
                 gold_answers = normalize_gold_answer_ids(
                     samples["gold_answers"][i] if "gold_answers" in samples else None,
                     target_id,
                 )
-                gold_answer_set = set(gold_answers)
                 rank_idx = first_correct_candidate_rank(candidate_ids, gold_answers)
                 row = dataset.data.iloc[int(samples["ids"][i].item())] if dataset is not None and hasattr(dataset, "data") else None
                 hop_count = row_to_hop_count(row)
@@ -933,10 +766,8 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                 gt_relations = row_to_gt_relations(row)
                 answer_set_topk = max(1, args.answer_set_topk)
                 predicted_endpoints = candidate_ids[:answer_set_topk]
-                answer_p, answer_r, answer_f1 = answer_set_f1(predicted_endpoints, gold_answers)
+                _, _, answer_f1 = answer_set_f1(predicted_endpoints, gold_answers)
                 answer_f1_sum += answer_f1
-                answer_p_sum += answer_p
-                answer_r_sum += answer_r
                 sample_f1_sg = 0.0
                 if gt_edges:
                     _, _, sample_f1_sg = gt_edge_overlap_f1(pred_edges, gt_edges, special_tokens, inverse_mapping)
@@ -979,7 +810,6 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     ranking_value = 1 + rank_idx
                     sample_mrr = 1 / ranking_value
                     mrr += sample_mrr
-                    hit += 1
                     if ranking_value <= 1:
                         hit1 += 1
                         sample_hit1 = 1
@@ -1008,50 +838,11 @@ def evaluate(model, dataloader, device, args, true_triples=None, valid_triples=N
                     hop_metric["ped"] += sample_ped
                     hop_metric["answer_f1"] += answer_f1
                 lines.append(path_token+'\n')
-                if debug_sample:
-                    rank_text = rank_idx + 1 if rank_idx is not None else None
-                    top1 = candidate_ids[0] if candidate_ids else None
-                    debug_blocks[i].extend([
-                        "[RANKING]",
-                        f"Sorted candidates: {candidate_ids}",
-                        "Sorted decoded: " + " | ".join(debug_token(candidate_id) for candidate_id in candidate_ids),
-                        "Gold: " + " | ".join(debug_token(answer_id) for answer_id in gold_answers),
-                        f"Rank: {rank_text}",
-                        f"Top-1: {debug_token(top1) if top1 is not None else None}",
-                        "========================================",
-                    ])
-                    # uncommend this line if you want to see the debug blocks 
-                    # for the first 2 samples (will print a lot of info about model input and logits)
-                    # write_tqdm_block("\n".join(debug_blocks[i]))
-
-                if len(preview_blocks) < preview_limit:
-                    preview_blocks.append(
-                        build_eval_preview(
-                            dataset=dataset,
-                            sample_id=samples["ids"][i].item(),
-                            head_id=hid,
-                            gold_answer_ids=gold_answers,
-                            candidate_ids=candidate_ids,
-                            candidate_paths=candidate_path,
-                            preview_topk=preview_topk,
-                            rank_idx=rank_idx,
-                            rev_dict=rev_dict,
-                            eos=eos,
-                            bos=bos,
-                            test_paraphrased=args.test_paraphrased
-                        )
-                    )
     
     if args.output_path and split_name=="test":
         with open(os.path.join(args.save_dir,"test_output_squire.txt"), "w") as f:
             f.writelines(lines)
     metric_denominator = max(1, count)
-    if preview_blocks:
-        for idx, block in enumerate(preview_blocks, start=1):
-            write_tqdm_block(f"[{split_name.upper()} Example {idx}]")
-            write_tqdm_block(block)
-            if idx != len(preview_blocks):
-                tqdm.write("")
     summary = "[%s] MRR: %.6f, Hit@1: %.6f, Hit@3: %.6f, Hit@5: %.6f, Hit@10: %.6f, F1_SG: %.6f, RED: %.6f, F1_REL: %.6f, PED: %.6f, AnswerF1: %.6f" % (
         split_name.upper(),
         mrr/metric_denominator,
