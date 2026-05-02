@@ -8,6 +8,7 @@ data/*
 
 # Models and checkpoints
 models/
+models_test/
 models_new/
 AnyBURL/path1/
 AnyBURL/path_kinship/
