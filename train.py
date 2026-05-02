@@ -537,10 +537,16 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
     np.random.seed(worker_seed)
 
-def count_parameters(model):
+def count_parameters(model, exclude_bert=False):
     """Count total and trainable parameters in a PyTorch model."""
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = 0
+    trainable_params = 0
+    for name, param in model.named_parameters():
+        if exclude_bert and 'bert' in name:
+            continue
+        total_params += param.numel()
+        if param.requires_grad:
+            trainable_params += param.numel()
     return total_params, trainable_params
 
 def build_dataloader_generator(seed):
@@ -1479,11 +1485,12 @@ def checkpoint(args):
     model = model.to(device)
     
     # Count and print model parameters
-    total_params, trainable_params = count_parameters(model)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(".2f")
-    print(".2f")
+    total_params, trainable_params = count_parameters(model, exclude_bert=False)
+    total_params_no_bert, trainable_params_no_bert = count_parameters(model, exclude_bert=True)
+    print(f"Total parameters (with BERT): {total_params:,}")
+    print(f"Trainable parameters (with BERT): {trainable_params:,}")
+    print(f"Total parameters (without BERT): {total_params_no_bert:,}")
+    print(f"Trainable parameters (without BERT): {trainable_params_no_bert:,}")
     
     with torch.no_grad():
         evaluate(model, test_loader, device, args, train_valid, eval_valid, split_name="test")
