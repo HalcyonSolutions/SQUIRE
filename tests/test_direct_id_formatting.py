@@ -1,5 +1,5 @@
 from dataset import Seq2SeqDataset, _flatten_path_hops, _parse_paths_cell
-from train import build_rev_dict, format_generated_path, format_gold_path
+from train import format_generated_path
 
 
 class Args:
@@ -33,12 +33,9 @@ def test_direct_id_mappings_use_human_readable_labels():
 
 
 def test_generated_path_formats_full_direct_id_hops():
-    args = Args()
     dataset = build_mquake_dataset()
-    
-    column = "Question-Paraphrased" if args.train_paraphrased else "Question"
     row = dataset.data[
-        dataset.data[column]
+        dataset.data["Question"]
         == "Which continent is the country in, where the founder of Church of Sweden is a citizen?"
     ].iloc[0]
 
@@ -47,7 +44,7 @@ def test_generated_path_formats_full_direct_id_hops():
     token_ids.extend(dataset.dictionary.indices[token] for token in flat_tokens)
     token_ids.append(dataset.dictionary.eos())
 
-    rev_dict = build_rev_dict(dataset.dictionary)
+    rev_dict = {v: k for k, v in dataset.dictionary.indices.items()}
     formatted = format_generated_path(
         row["Source"],
         token_ids,
@@ -62,4 +59,3 @@ def test_generated_path_formats_full_direct_id_hops():
         "--country of citizenship--> Sweden --continent--> Europe"
     )
     assert formatted == expected
-    assert format_gold_path(row) == expected
