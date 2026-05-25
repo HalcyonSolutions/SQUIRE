@@ -28,3 +28,7 @@ test_output_squire.txt
 # Misc
 count_params.py
 local/
+codebase.tar
+dataset.tar
+models_pretrained.tar
+models_pretrained/
